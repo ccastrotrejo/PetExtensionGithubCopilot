@@ -79,6 +79,60 @@ enum PetCoreTests {
         }
         check(reachedFront && reachedLeft, "from right, both left and front are reachable")
 
+        // MARK: Cadence.fps / interval — the four (reduceMotion, calm) combinations
+        check(Cadence.fps(reduceMotion: false, calm: false) == 30, "active: 30 FPS")
+        check(Cadence.fps(reduceMotion: false, calm: true) == 5, "calm: 5 FPS")
+        check(Cadence.fps(reduceMotion: true, calm: false) == 10, "Reduce Motion + active: 10 FPS")
+        check(Cadence.fps(reduceMotion: true, calm: true) == 2, "Reduce Motion + calm: 2 FPS")
+        check(abs(Cadence.interval(reduceMotion: false, calm: false) - 1.0 / 30.0) < 1e-9, "active: interval = 1/30s")
+        check(abs(Cadence.interval(reduceMotion: true, calm: true) - 1.0 / 2.0) < 1e-9, "Reduce Motion + calm: interval = 1/2s")
+
+        // MARK: Cadence — hidden/occluded polling is a fixed low rate, independent of mood/Reduce Motion
+        check(Cadence.hiddenFPS == 5, "hidden/occluded: 5 FPS poll-only")
+        check(abs(Cadence.hiddenInterval - 1.0 / 5.0) < 1e-9, "hidden/occluded: interval = 1/5s")
+
+        // MARK: Cadence.isCalm — which moods are safe to throttle
+        check(Cadence.isCalm(.idle), "idle is calm")
+        check(Cadence.isCalm(.sleeping), "sleeping is calm")
+        check(!Cadence.isCalm(.greet), "greet is not calm")
+        check(!Cadence.isCalm(.thinking), "thinking is not calm")
+        check(!Cadence.isCalm(.working), "working is not calm")
+        check(!Cadence.isCalm(.happy), "happy is not calm")
+        check(!Cadence.isCalm(.worried), "worried is not calm")
+
+        // MARK: Pose.motionScale — default vs. Reduce Motion damping
+        check(Pose.make(for: .idle, phase: 0, message: "").motionScale == 1, "motionScale defaults to 1")
+        check(Pose.make(for: .idle, phase: 0, message: "", reduceMotion: true).motionScale == Pose.reducedMotionScale,
+              "Reduce Motion sets motionScale to reducedMotionScale (~15%)")
+        check(Pose.reducedMotionScale == 0.15, "reducedMotionScale is ~15%")
+
+        // MARK: Reduce Motion — ambient wobble damped to ~15%, expressions untouched, per mood
+        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried] {
+            let phase = 0.35 // away from zero for every mood's oscillating field
+            let normal = Pose.make(for: mood, phase: phase, message: "hello")
+            let damped = Pose.make(for: mood, phase: phase, message: "hello", reduceMotion: true)
+
+            check(abs(damped.bob) <= abs(normal.bob) * Pose.reducedMotionScale + 1e-9,
+                  "\(mood): bob damped to ~15% under Reduce Motion")
+            check(abs(damped.scaleY - 1) <= abs(normal.scaleY - 1) * Pose.reducedMotionScale + 1e-9,
+                  "\(mood): breathing scale delta damped to ~15% under Reduce Motion")
+            check(abs(damped.headTilt) <= abs(normal.headTilt) * Pose.reducedMotionScale + 1e-9,
+                  "\(mood): headTilt damped to ~15% under Reduce Motion")
+            check(abs(damped.headBob) <= abs(normal.headBob) * Pose.reducedMotionScale + 1e-9,
+                  "\(mood): headBob damped to ~15% under Reduce Motion")
+            check(abs(damped.tremble) <= abs(normal.tremble) * Pose.reducedMotionScale + 1e-9,
+                  "\(mood): tremble damped to ~15% under Reduce Motion")
+
+            check(damped.feat.eyes == normal.feat.eyes, "\(mood): eyes unchanged under Reduce Motion")
+            check(damped.feat.mouth == normal.feat.mouth, "\(mood): mouth unchanged under Reduce Motion")
+            check(damped.feat.wag == normal.feat.wag, "\(mood): wag speed unchanged under Reduce Motion")
+            check(damped.feat.tailDown == normal.feat.tailDown, "\(mood): tailDown unchanged under Reduce Motion")
+            check(damped.accessory == normal.accessory, "\(mood): accessory unchanged under Reduce Motion")
+            check(damped.bubble == normal.bubble, "\(mood): bubble text unchanged under Reduce Motion")
+        }
+        // At least one mood must actually exercise a non-zero field for the damping checks above to be meaningful.
+        check(Pose.make(for: .worried, phase: 0.35, message: "").tremble > 0, "worried: tremble is non-zero (sanity check for damping test)")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

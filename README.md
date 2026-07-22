@@ -16,6 +16,18 @@ glances around on its own — looking left, right, or straight at you.
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing), then 😴 **sleeps** after ~18s |
 
+## Animation & accessibility
+
+The pet respects **Reduce Motion** (System Settings → Accessibility → Display). When it's on,
+non-essential bobbing/tilting/trembling is damped to ~15% of normal, and binary accessory animation
+(gear spin, sparkle pulse) is frozen outright — expressions (eyes, mouth, accessory, speech bubble)
+are unaffected and stay fully readable.
+
+Redraw cadence is also throttled to save CPU: 30 FPS while actively animating (greet/thinking/
+working/happy/worried), dropping to 5 FPS when calm (idle/sleeping); with Reduce Motion on, 10 FPS
+active / 2 FPS calm. While the window is hidden or occluded (covered by another window / on
+another Space), it ticks at ~5 FPS just to poll state and the heartbeat — no animation, no redraw.
+
 ## Install / activate
 
 This extension lives in `~/.copilot/extensions/copilot-pet/`. It is discovered automatically by the
@@ -58,9 +70,9 @@ The extension registers a `pet_control` tool. Ask the agent things like *"hide t
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures` (no AppKit). Unit-tested. |
-| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`. |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext`. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence` (no AppKit). Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; schedules ticks dynamically via `Cadence`. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence`. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 

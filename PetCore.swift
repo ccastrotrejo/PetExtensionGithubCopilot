@@ -25,6 +25,41 @@ enum Mood: String {
     }
 }
 
+// MARK: - Animation cadence policy (testable, no AppKit)
+
+/// How often the view should tick/redraw. Kept separate from AppKit (pure
+/// function of mood + the OS Reduce Motion setting) so it's unit-testable
+/// without a running app. The renderer additionally drops to `hiddenFPS`
+/// whenever the window itself isn't visible — that case lives here too so
+/// all cadence numbers are defined in one place.
+enum Cadence {
+    /// Ticks/frames per second while the window is on-screen.
+    static func fps(reduceMotion: Bool, calm: Bool) -> Double {
+        switch (reduceMotion, calm) {
+        case (false, false): return 30   // actively animating (greet/thinking/working/happy/worried)
+        case (false, true):  return 5    // idle/sleeping — nothing urgent to show
+        case (true, false):  return 10   // Reduce Motion, but still reacting to something
+        case (true, true):   return 2    // Reduce Motion + calm — bare minimum to notice a change
+        }
+    }
+
+    /// Tick interval in seconds for `fps(reduceMotion:calm:)`.
+    static func interval(reduceMotion: Bool, calm: Bool) -> TimeInterval {
+        1.0 / fps(reduceMotion: reduceMotion, calm: calm)
+    }
+
+    /// FPS used purely to keep polling state/heartbeat while the window is
+    /// hidden or occluded: no animation, no redraw, just enough to notice a
+    /// mood change or a stale heartbeat.
+    static let hiddenFPS: Double = 5
+    static let hiddenInterval: TimeInterval = 1.0 / hiddenFPS
+
+    /// Moods with nothing time-sensitive to communicate — safe to throttle.
+    static func isCalm(_ mood: Mood) -> Bool {
+        mood == .idle || mood == .sleeping
+    }
+}
+
 // MARK: - Expression model
 
 enum EyeState { case open, closed, happy, worried }
@@ -70,45 +105,57 @@ struct Pose {
     var bubble: String? = nil
     var feat = DogFeatures()
 
-    static func make(for mood: Mood, phase: Double, message: String) -> Pose {
+    /// How much of the model's "raw" motion survives once Reduce Motion is
+    /// respected: `1` normally, damped to `reducedMotionScale` (~15%) when the
+    /// OS setting is on. Non-essential bobbing/tilting/trembling below is
+    /// scaled by it directly; the renderer applies the same value to its own
+    /// tail/ear/accessory/pant amplitudes (see pet.swift). Expressions — eyes,
+    /// mouth, accessory kind, bubble text — are never touched by this: only
+    /// the wobble is damped, not what the pet is communicating.
+    var motionScale: CGFloat = 1
+    static let reducedMotionScale: CGFloat = 0.15
+
+    static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false) -> Pose {
         var p = Pose()
+        let scale: CGFloat = reduceMotion ? reducedMotionScale : 1
+        p.motionScale = scale
         switch mood {
         case .idle:
             // Calm breathing; the tail sways and the ear ticks (handled in draw).
-            p.scaleY = 1 + sin(phase * 2.2) * 0.02
+            p.scaleY = 1 + sin(phase * 2.2) * 0.02 * scale
             p.feat = DogFeatures(eyes: .open, mouth: .smile, wag: 2)
         case .sleeping:
             // Slow deep breaths; the head rises and falls with each breath.
-            p.scaleY = 1 + sin(phase * 1.8) * 0.035
-            p.headBob = sin(phase * 1.8) * 0.4
+            p.scaleY = 1 + sin(phase * 1.8) * 0.035 * scale
+            p.headBob = sin(phase * 1.8) * 0.4 * scale
             p.feat = DogFeatures(eyes: .closed, mouth: .neutral, wag: 0)
             p.accessory = .sleep
         case .greet:
             // Eager little hops with a fast wagging tail.
-            p.bob = abs(sin(phase * 7)) * 8
+            p.bob = abs(sin(phase * 7)) * 8 * scale
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 12)
             p.accessory = .wave; p.bubble = "hi!"
         case .thinking:
             // Curious head tilt side to side — the body stays put.
-            p.headTilt = sin(phase * 1.5) * 0.22
+            p.headTilt = sin(phase * 1.5) * 0.22 * scale
             p.feat = DogFeatures(eyes: .open, mouth: .neutral, wag: 1)
             p.accessory = .think; p.bubble = message.isEmpty ? "thinking…" : message
         case .working:
             // Nose-down sniffing/digging while it works; panting tongue.
-            p.headBob = -abs(sin(phase * 5)) * 1.4
+            p.headBob = -abs(sin(phase * 5)) * 1.4 * scale
             p.feat = DogFeatures(eyes: .open, mouth: .pant, wag: 5)
             p.accessory = .gear; p.bubble = message.isEmpty ? "working…" : message
         case .happy:
             // Springy bounce with a squash-and-stretch on the landing.
             let hop = abs(sin(phase * 6))
-            p.bob = hop * 16
-            p.scaleY = 1 + (1 - hop) * 0.06 - hop * 0.03
+            p.bob = hop * 16 * scale
+            p.scaleY = 1 + ((1 - hop) * 0.06 - hop * 0.03) * scale
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
             p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
         case .worried:
             // Cowering: head lowered and trembling, tail tucked.
-            p.headBob = -0.7
-            p.tremble = 0.5
+            p.headBob = -0.7 * scale
+            p.tremble = 0.5 * scale
             p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
             p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
         }

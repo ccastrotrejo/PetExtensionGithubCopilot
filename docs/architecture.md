@@ -142,10 +142,33 @@ The window is small (sized to the pet, not full-screen). `PetView.hitTest` retur
 the pet's body, so everywhere else stays click-through; dragging the body moves the window and the new
 origin is persisted to `pet.pos` (next to `state.json`) and restored on launch.
 
-A `Timer` at ~30 fps drives `PetView.tick()`, which polls the state file (~5×/s), runs the mood machine,
-and redraws. The pet is a pixel-art dachshund drawn with Core Graphics as grid-aligned blocks (limited
-palette), plus a pixel-art status icon (gear, sparkle, thought cloud, sweat, Zzz, waving paw), a rounded
-speech bubble with a tail, and a soft ground shadow.
+`PetView.tick()` polls the state file (~5×/s), runs the mood machine, and redraws — but it isn't driven
+by a fixed-rate `Timer` any more. Instead, `main()` schedules a one-shot `Timer` after every tick, using
+`PetView.nextTickInterval` for the delay, so cadence adapts on the fly:
+
+- **`Cadence`** (in `PetCore.swift`, pure/testable) maps `(reduceMotion, calm)` to an FPS: 30 fps while
+  actively animating, 5 fps once the mood is calm (idle/sleeping), 10 fps / 2 fps for the same two cases
+  when the OS **Reduce Motion** setting (`NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`) is
+  on.
+- Whenever the window is hidden (`hidden` mood → `orderOut`) or occluded (`window.occlusionState` doesn't
+  contain `.visible` — covered by another window, or on another Space), `tick()` still polls state and the
+  heartbeat at `Cadence.hiddenFPS` (5 fps), but skips advancing `state.phase` and never sets `needsDisplay`
+  — nothing is animated or redrawn while nobody can see it. `tick()` checks visibility only *after*
+  `loadState()` runs (which may itself show/hide the window), so a window hidden or shown this tick is
+  never animated/redrawn against stale, pre-load visibility; `nextTickInterval` is likewise read only after
+  `tick()` returns, so the next scheduled tick reflects that same fresh state.
+- Reduce Motion also damps the pet's own motion via `Pose.motionScale` (`~15%` of normal, `Pose.reducedMotionScale`):
+  whole-body bob, breathing scale, head tilt/bob, and trembling are scaled down in `Pose.make`, and the
+  renderer scales its own tail wag / ear flap / accessory bob amplitudes by the same factor. The gear's
+  spinning teeth, the sparkle's pulsing size, and the panting tongue's drop are binary/discrete rather than
+  continuous, so they're frozen on one frame instead of just scaled down. Expressions — which
+  eyes/mouth/accessory/bubble are shown — are never touched, so the pet still reads clearly; only the
+  ambient wobble is dampened. The automatic look-around (turning to face you) is skipped entirely under
+  Reduce Motion, as the most conspicuous non-essential motion.
+
+The pet is a pixel-art dachshund drawn with Core Graphics as grid-aligned blocks (limited palette), plus
+a pixel-art status icon (gear, sparkle, thought cloud, sweat, Zzz, waving paw), a rounded speech bubble
+with a tail, and a soft ground shadow.
 
 ## Known limitations
 
