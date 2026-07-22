@@ -133,6 +133,137 @@ enum PetCoreTests {
         // At least one mood must actually exercise a non-zero field for the damping checks above to be meaningful.
         check(Pose.make(for: .worried, phase: 0.35, message: "").tremble > 0, "worried: tremble is non-zero (sanity check for damping test)")
 
+        // MARK: PetConfig.parse — defaults, merging, clamping, validation
+        let defaults = PetConfig.parse(nil)
+        check(defaults.size == 62 && defaults.lookAroundInterval == 4...9, "config: defaults when absent")
+        check(defaults.behaviors == ["lookAround", "bubbles"] && !defaults.muted && !defaults.reduceMotion,
+              "config: default behaviors, unmuted, motion on")
+        check(defaults.lookAround && defaults.bubblesEnabled, "config: lookAround + bubbles on by default")
+        check(PetConfig.parse([:]) == defaults, "config: empty object == defaults")
+
+        // Partial config keeps defaults for the missing keys.
+        let partial = PetConfig.parse(["size": 90.0])
+        check(partial.size == 90 && partial.lookAroundInterval == 4...9, "config: partial keeps other defaults")
+
+        // size clamps to a sane window range.
+        check(PetConfig.parse(["size": 5.0]).size == 32, "config: size clamps up to 32")
+        check(PetConfig.parse(["size": 999.0]).size == 160, "config: size clamps down to 160")
+
+        // lookAroundInterval accepts a fixed number or a [min, max] pair.
+        check(PetConfig.parse(["lookAroundInterval": 6.0]).lookAroundInterval == 6...6, "config: fixed interval")
+        check(PetConfig.parse(["lookAroundInterval": [3.0, 8.0]]).lookAroundInterval == 3...8, "config: [min,max] interval")
+        check(PetConfig.parse(["lookAroundInterval": [8.0, 3.0]]).lookAroundInterval == 3...8, "config: interval order-normalized")
+
+        // muted suppresses bubbles even when the behavior is enabled.
+        check(!PetConfig.parse(["muted": true]).bubblesEnabled, "config: muted suppresses bubbles")
+        check(!PetConfig.parse(["enabledBehaviors": ["lookAround"]]).bubblesEnabled, "config: bubbles off when not listed")
+        check(!PetConfig.parse(["enabledBehaviors": ["bubbles"]]).lookAround, "config: lookAround off when not listed")
+        check(PetConfig.parse(["enabledBehaviors": ["bubbles", "bogus"]]).behaviors == ["bubbles"],
+              "config: unknown behaviors ignored")
+
+        check(PetConfig.parse(["reduceMotion": true]).reduceMotion, "config: reduceMotion parsed")
+        check(PetConfig.parse(["breed": "corgi"]).breed == "corgi", "config: breed parsed (reserved)")
+        check(PetConfig.parse(["palette": "gray"]).palette == "gray", "config: palette parsed (reserved)")
+
+        // Wrong types fall back to defaults rather than crashing.
+        check(PetConfig.parse(["size": "big"]).size == 62, "config: bad type falls back to default")
+
+        // MARK: reduceMotion — damps motion fields (~15%), keeps expression
+        // (Comprehensive per-mood damping coverage lives in the loop above;
+        // this just spot-checks two moods alongside the config/arbitration suite.)
+        let calmHappy = Pose.make(for: .happy, phase: 0.25, message: "", reduceMotion: true)
+        check(abs(calmHappy.bob) <= abs(Pose.make(for: .happy, phase: 0.25, message: "").bob) * Pose.reducedMotionScale + 1e-9,
+              "reduceMotion: happy bob damped to ~15%")
+        check(calmHappy.accessory == .sparkle && calmHappy.feat.eyes == .happy && calmHappy.feat.wag > 0,
+              "reduceMotion: keeps the happy expression (wag speed untouched)")
+        let calmThinking = Pose.make(for: .thinking, phase: 1.0, message: "", reduceMotion: true)
+        check(abs(calmThinking.headTilt) <= abs(Pose.make(for: .thinking, phase: 1.0, message: "").headTilt) * Pose.reducedMotionScale + 1e-9,
+              "reduceMotion: thinking headTilt damped to ~15%")
+        check(calmThinking.accessory == .think && calmThinking.bubble == "thinking…",
+              "reduceMotion: keeps thinking accessory + bubble")
+
+        // MARK: Arbitration — multi-session, one shared pet
+        let base = 1_000_000.0  // arbitrary "now" in ms
+        func snap(_ id: String, _ mood: String, activity: Double, heartbeat: Double = 0, msg: String = "") -> SessionSnapshot {
+            SessionSnapshot(id: id, mood: mood, message: msg, activity: activity, heartbeat: heartbeat)
+        }
+
+        // No sessions → nothing to show (caller keeps current pose).
+        check(Arbitration.resolve([], now: base, hadLiveSessions: false) == nil, "arbitration: empty → nil")
+
+        // A single live session drives the pet with its mood + message.
+        let single = Arbitration.resolve(
+            [snap("a", "working", activity: base, heartbeat: base, msg: "npm test")],
+            now: base, hadLiveSessions: true)
+        check(single?.command == .show(.working, message: "npm test") && single?.winner == "a",
+              "arbitration: single live session shows its mood")
+
+        // A session whose heartbeat is stale is ignored entirely.
+        check(Arbitration.resolve([snap("dead", "working", activity: base, heartbeat: base - 20_000)],
+                                  now: base, hadLiveSessions: true) == nil,
+              "arbitration: stale session excluded → nil")
+        check(Arbitration.liveSessions([snap("live", "idle", activity: base, heartbeat: base),
+                                        snap("dead", "idle", activity: base, heartbeat: base - 13_000)],
+                                       now: base).map { $0.id } == ["live"],
+              "arbitration: liveSessions drops stale heartbeats")
+
+        // Staleness boundary: a heartbeat exactly at the window is still live; one ms older is dead.
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs)],
+                                       now: base).count == 1,
+              "arbitration: heartbeat exactly at staleAfterMs is still live")
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs - 1)],
+                                       now: base).isEmpty,
+              "arbitration: heartbeat one ms past staleAfterMs is dead")
+
+        // Most-recent-activity wins between two live sessions.
+        let recent = Arbitration.resolve(
+            [snap("old", "working", activity: base - 5_000, heartbeat: base, msg: "old"),
+             snap("new", "thinking", activity: base, heartbeat: base, msg: "new")],
+            now: base, hadLiveSessions: true)
+        check(recent?.command == .show(.thinking, message: "new") && recent?.winner == "new",
+              "arbitration: most-recent-activity wins")
+
+        // Control signals from the winner are honored globally.
+        check(Arbitration.resolve([snap("a", "quit", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .quit,
+              "arbitration: winner 'quit' → quit")
+        check(Arbitration.resolve([snap("a", "hidden", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .hide,
+              "arbitration: winner 'hidden' → hide")
+        // A quit/hide from a *stale* newer entry doesn't win; the live one does.
+        let liveOverStaleQuit = Arbitration.resolve(
+            [snap("a", "working", activity: base - 1_000, heartbeat: base, msg: "go"),
+             snap("z", "quit", activity: base, heartbeat: base - 20_000)],
+            now: base, hadLiveSessions: true)
+        check(liveOverStaleQuit?.command == .show(.working, message: "go"),
+              "arbitration: stale 'quit' is ignored, live worker wins")
+
+        // Greet de-dup: honored on 0→N, downgraded to idle once sessions are live.
+        check(Arbitration.resolve([snap("first", "greet", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: false)?.command == .show(.greet, message: ""),
+              "arbitration: greet honored on first live session")
+        check(Arbitration.resolve([snap("nth", "greet", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .show(.idle, message: ""),
+              "arbitration: greet de-duped once sessions are already live")
+
+        // Unknown moods fall back to idle.
+        check(Arbitration.resolve([snap("a", "bogus", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .show(.idle, message: ""),
+              "arbitration: unknown mood → idle")
+
+        // Tie on activity is broken deterministically (by id) — winner is stable.
+        let tieA = Arbitration.resolve(
+            [snap("a", "working", activity: base, heartbeat: base),
+             snap("b", "thinking", activity: base, heartbeat: base)],
+            now: base, hadLiveSessions: true)
+        let tieB = Arbitration.resolve(
+            [snap("b", "thinking", activity: base, heartbeat: base),
+             snap("a", "working", activity: base, heartbeat: base)],
+            now: base, hadLiveSessions: true)
+        check(tieA == tieB && tieA?.winner == "b", "arbitration: activity tie broken deterministically by id")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

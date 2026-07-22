@@ -14,17 +14,25 @@ import Cocoa
 
 final class PetState {
     var statePath: String
-    var lastSeq: Int = -1
+    var sessionsDir: String            // dir of per-session state files to arbitrate
+    var lastKey: String = ""           // winner id + activity of the applied resolution
     var mood: Mood = .greet
     var message: String = ""
     var moodChangeTime: TimeInterval = Date().timeIntervalSince1970
-    var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0
+    var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0  // freshest controller
+    var hadLiveSessions: Bool = false  // was any session live on the previous tick?
     var phase: Double = 0
     var lastPoll: TimeInterval = 0
     var facing: Facing = .front       // greet by looking at you
     var nextTurn: TimeInterval = 0    // when to next glance around
+    var config = PetConfig()          // user settings (hot-reloaded from config.json)
+    var configPath: String = ""
+    var configMTime: Double = -1      // last-seen config.json mtime; -1 = absent
 
-    init(statePath: String) { self.statePath = statePath }
+    init(statePath: String) {
+        self.statePath = statePath
+        self.sessionsDir = (statePath as NSString).deletingLastPathComponent + "/sessions"
+    }
 }
 
 // MARK: - Pet view
@@ -32,7 +40,7 @@ final class PetState {
 final class PetView: NSView {
     let state: PetState
     let groundY: CGFloat = 40
-    let petSize: CGFloat = 62
+    var petSize: CGFloat { state.config.size }   // user-configurable (config.json)
     var lastFrameTime: TimeInterval = Date().timeIntervalSince1970
 
     init(frame: NSRect, state: PetState) {
@@ -58,8 +66,14 @@ final class PetView: NSView {
 
     /// Live read of the OS accessibility setting, checked every tick so the
     /// pet reacts immediately if the user flips it while running.
-    private var reduceMotionEnabled: Bool {
+    private var osReduceMotionEnabled: Bool {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Effective Reduce Motion: honors either the live OS accessibility setting
+    /// or the user's `config.json` override — whichever asks for stillness wins.
+    private var reduceMotionEnabled: Bool {
+        osReduceMotionEnabled || state.config.reduceMotion
     }
 
     /// False while the window is hidden (`orderOut`) or occluded (covered by
@@ -87,6 +101,7 @@ final class PetView: NSView {
         if now - state.lastPoll > 0.18 {
             state.lastPoll = now
             loadState()   // may hide/show the window (e.g. "hidden" mood)
+            loadConfig()
         }
 
         let hbAgeMs = now * 1000.0 - state.heartbeat
@@ -102,14 +117,14 @@ final class PetView: NSView {
         if visible { state.phase += dt }
 
         // Occasionally turn to look right / left / at you (skip the first frame
-        // so the initial facing sticks). Reduce Motion drops this entirely —
-        // it's the most conspicuous "non-essential" motion and unnecessary
-        // while hidden/occluded too.
-        if visible, !reduceMotionEnabled, now >= state.nextTurn {
+        // so the initial facing sticks). Honors the lookAround behavior and
+        // Reduce Motion (OS or config) — a still/hidden/occluded pet keeps
+        // facing you; it's the most conspicuous "non-essential" motion.
+        if visible, state.config.lookAround, !reduceMotionEnabled, now >= state.nextTurn {
             if state.nextTurn != 0 {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
-            state.nextTurn = now + Double.random(in: 4...9)
+            state.nextTurn = now + Double.random(in: state.config.lookAroundInterval)
         }
 
         advanceMood(now: now)
@@ -117,29 +132,109 @@ final class PetView: NSView {
     }
 
     private func loadState() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: state.statePath)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        let now = Date().timeIntervalSince1970
+        let nowMs = now * 1000.0
+        let sessions = readSessions()
 
-        if let hb = obj["heartbeat"] as? Double { state.heartbeat = hb }
-        let seq = (obj["seq"] as? Int) ?? Int((obj["seq"] as? Double) ?? -1)
-        guard seq != state.lastSeq else { return }
-        state.lastSeq = seq
+        // The freshest controller heartbeat drives the shared watchdog: the pet
+        // only self-terminates once *every* session has gone stale (checked in tick).
+        if let freshest = sessions.map({ $0.heartbeat }).max() {
+            state.heartbeat = freshest
+        }
 
-        let raw = (obj["mood"] as? String) ?? "idle"
-        if raw == "quit" { NSApp.terminate(nil); return }
-        if let win = self.window {
-            if raw == "hidden" { win.orderOut(nil) }
-            else if !win.isVisible { win.orderFrontRegardless() }
+        let resolution = Arbitration.resolve(sessions, now: nowMs, hadLiveSessions: state.hadLiveSessions)
+        state.hadLiveSessions = !Arbitration.liveSessions(sessions, now: nowMs).isEmpty
+
+        guard let res = resolution else { return }  // no live session → keep current pose
+
+        if case .quit = res.command { NSApp.terminate(nil); return }
+
+        // React only when the driving session/event changes, so a session that
+        // keeps re-writing the same mood doesn't reset local timers every poll.
+        let key = "\(res.winner)#\(res.activity)"
+        guard key != state.lastKey else { return }
+        state.lastKey = key
+
+        switch res.command {
+        case .quit:
+            return  // handled above
+        case .hide:
+            self.window?.orderOut(nil)
+        case .show(let mood, let message):
+            if let win = self.window, !win.isVisible { win.orderFrontRegardless() }
+            state.mood = mood
+            state.message = message
+            state.moodChangeTime = now
+            // On a fresh greeting, turn to face you for a moment.
+            if state.mood == .greet {
+                state.facing = .front
+                state.nextTurn = now + 3
+            }
         }
-        if raw != "hidden" { state.mood = Mood(rawValue: raw) ?? .idle }
-        state.message = (obj["message"] as? String) ?? ""
-        state.moodChangeTime = Date().timeIntervalSince1970
-        // On a fresh greeting, turn to face you for a moment.
-        if state.mood == .greet {
-            state.facing = .front
-            state.nextTurn = Date().timeIntervalSince1970 + 3
+    }
+
+    /// Read and parse every `*.json` session file, pruning long-dead ones so the
+    /// directory doesn't grow without bound.
+    private func readSessions() -> [SessionSnapshot] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: state.sessionsDir) else { return [] }
+        let nowMs = Date().timeIntervalSince1970 * 1000.0
+        var out: [SessionSnapshot] = []
+        for name in names where name.hasSuffix(".json") {
+            let full = state.sessionsDir + "/" + name
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: full)),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let heartbeat = (obj["heartbeat"] as? Double) ?? 0
+            // Well past the stale window: the controller is gone for good — clean up.
+            if nowMs - heartbeat > 60_000 { try? fm.removeItem(atPath: full); continue }
+            let id = (obj["id"] as? String) ?? (name as NSString).deletingPathExtension
+            let mood = (obj["mood"] as? String) ?? "idle"
+            let message = (obj["message"] as? String) ?? ""
+            let activity = (obj["activity"] as? Double) ?? (obj["ts"] as? Double) ?? 0
+            out.append(SessionSnapshot(id: id, mood: mood, message: message,
+                                       activity: activity, heartbeat: heartbeat))
         }
+        return out
+    }
+
+    // Poll config.json for changes (hot-reload). Cheap: only re-parses when the
+    // file's mtime changes; an absent or unreadable file falls back to defaults.
+    private func loadConfig() {
+        let path = state.configPath
+        guard !path.isEmpty else { return }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        if mtime == state.configMTime { return }   // nothing changed
+        state.configMTime = mtime
+
+        let newConfig: PetConfig
+        if mtime >= 0,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            newConfig = PetConfig.parse(obj)
+        } else {
+            newConfig = PetConfig()   // absent or broken → defaults
+        }
+
+        let oldSize = state.config.size
+        state.config = newConfig
+        if !newConfig.lookAround { state.facing = .front }   // stop mid-glance
+        if newConfig.size != oldSize { resizeWindow() }
+        needsDisplay = true
+    }
+
+    // Grow/shrink the window to fit the configured pet size. The pet is drawn
+    // bottom-centered, so we keep the bottom edge and horizontal center fixed
+    // (grow symmetrically about the center) so it doesn't jump when resized.
+    private func resizeWindow() {
+        guard let win = self.window else { return }
+        let newSize = windowSize(for: petSize)
+        var frame = win.frame
+        frame.origin.x -= (newSize.width - frame.size.width) / 2   // keep center
+        frame.size = newSize
+        win.setFrame(frame, display: true)
+        self.frame = CGRect(origin: .zero, size: newSize)
     }
 
     private func advanceMood(now: TimeInterval) {
@@ -215,8 +310,8 @@ final class PetView: NSView {
             ctx.restoreGState()
         }
 
-        // Speech bubble
-        if let text = pose.bubble, !text.isEmpty {
+        // Speech bubble (suppressed when muted or the bubbles behavior is off)
+        if state.config.bubblesEnabled, let text = pose.bubble, !text.isEmpty {
             drawBubble(text, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
         }
     }
@@ -552,6 +647,13 @@ func writePos(_ o: CGPoint, _ path: String) {
     try? "\(o.x),\(o.y)".write(toFile: path, atomically: true, encoding: .utf8)
 }
 
+/// Window dimensions sized to fit the pet (config `size`), with a floor that
+/// keeps speech bubbles readable for small pets.
+func windowSize(for petSize: CGFloat) -> CGSize {
+    CGSize(width: max(200, (petSize * 3.3).rounded()),
+           height: max(170, (petSize * 2.8).rounded()))
+}
+
 // MARK: - App bootstrap
 
 @main
@@ -563,6 +665,8 @@ enum PetApp {
         }
         let statePath = CommandLine.arguments[1]
         let posPath = (statePath as NSString).deletingLastPathComponent + "/pet.pos"
+        // Optional user settings file (argv[2]); the pet also hot-reloads it.
+        let configPath = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2] : ""
 
         // Single-instance: hold an exclusive lock for the process lifetime. A second
         // pet (from a restart race or a concurrent session) fails to acquire it and
@@ -577,8 +681,17 @@ enum PetApp {
         app.setActivationPolicy(.accessory)
 
         let state = PetState(statePath: statePath)
+        state.configPath = configPath
+        // Read the config once up front so the initial window is the right size.
+        if !configPath.isEmpty,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            state.config = PetConfig.parse(obj)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: configPath)
+            state.configMTime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        }
 
-        let winSize = CGSize(width: 200, height: 170)
+        let winSize = windowSize(for: state.config.size)
         var origin = CGPoint(x: 200, y: 200)
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame

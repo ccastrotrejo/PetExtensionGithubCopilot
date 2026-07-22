@@ -162,3 +162,145 @@ struct Pose {
         return p
     }
 }
+
+// MARK: - Config (user settings; hot-reloaded from config.json)
+
+/// User-adjustable settings, parsed from `config.json` next to the extension.
+/// Every field is optional in the file; missing or malformed keys keep the
+/// defaults here, so an absent or partial config is always valid. Pure and
+/// testable — no file IO lives in this type (see `docs/config.md`).
+struct PetConfig: Equatable {
+    var size: CGFloat = 62
+    var lookAroundMin: Double = 4
+    var lookAroundMax: Double = 9
+    var behaviors: Set<String> = ["lookAround", "bubbles"]
+    var muted: Bool = false
+    var reduceMotion: Bool = false
+    var breed: String = "dachshund"      // reserved for the personalization issue
+    var palette: String = "chestnut"     // reserved for the personalization issue
+
+    /// Behaviors the pet understands today. Unknown entries in the file are ignored.
+    static let knownBehaviors: Set<String> = ["lookAround", "bubbles"]
+
+    /// Seconds between autonomous glances (left / right / at-you).
+    var lookAroundInterval: ClosedRange<Double> { lookAroundMin...lookAroundMax }
+    /// Glancing around is on unless the user turns it off.
+    var lookAround: Bool { behaviors.contains("lookAround") }
+    /// Speech bubbles show only when enabled *and* not muted.
+    var bubblesEnabled: Bool { !muted && behaviors.contains("bubbles") }
+
+    /// Merge a decoded JSON object over the defaults. Wrong types are ignored so
+    /// a malformed value never crashes the pet — it falls back to the default.
+    static func parse(_ obj: [String: Any]?) -> PetConfig {
+        var c = PetConfig()
+        guard let obj = obj else { return c }
+
+        if let n = obj["size"] as? Double { c.size = CGFloat(min(160, max(32, n))) }
+
+        // lookAroundInterval: a single number (fixed) or a [min, max] pair, seconds.
+        switch obj["lookAroundInterval"] {
+        case let n as Double:
+            let v = max(1, n); c.lookAroundMin = v; c.lookAroundMax = v
+        case let arr as [Any]:
+            let nums = arr.compactMap { $0 as? Double }
+            if nums.count >= 2 {
+                c.lookAroundMin = max(1, min(nums[0], nums[1]))
+                c.lookAroundMax = max(c.lookAroundMin, max(nums[0], nums[1]))
+            }
+        default: break
+        }
+
+        if let arr = obj["enabledBehaviors"] as? [Any] {
+            c.behaviors = Set(arr.compactMap { $0 as? String }).intersection(knownBehaviors)
+        }
+        if let b = obj["muted"] as? Bool { c.muted = b }
+        if let b = obj["reduceMotion"] as? Bool { c.reduceMotion = b }
+        if let s = obj["breed"] as? String, !s.isEmpty { c.breed = s }
+        if let s = obj["palette"] as? String, !s.isEmpty { c.palette = s }
+        return c
+    }
+}
+
+// MARK: - Multi-session arbitration
+//
+// One desktop pet is shared by *every* local Copilot session. Each session's
+// controller writes its own state file under `sessions/<id>.json`; the pet reads
+// them all and this pure arbiter decides what the single pet should do. Keeping
+// the logic here (no AppKit) means it is exercised directly by PetCoreTests.
+//
+// Rules:
+//   • Most-recent-activity wins — the session that changed mood last drives the pet.
+//   • Control signals (`hidden` / `quit`) from the winning session act on the one
+//     shared pet, i.e. they are respected globally.
+//   • Greets are de-duped across processes: a greet only plays on the transition
+//     from no live sessions to some, so opening N sessions never means N "hi!"s.
+//   • A session whose controller stopped heart-beating is considered dead and is
+//     ignored (and eventually pruned).
+
+/// A snapshot of one session's state file, as seen by the pet.
+struct SessionSnapshot: Equatable {
+    let id: String
+    let mood: String        // raw wire value; may be a control signal
+    let message: String
+    let activity: Double    // ms since epoch — when this session last changed mood
+    let heartbeat: Double   // ms since epoch — controller liveness
+}
+
+/// What the shared pet should do this tick.
+enum PetCommand: Equatable {
+    case show(Mood, message: String)
+    case hide
+    case quit
+}
+
+/// The arbiter's verdict. `winner`/`activity` form a change key so the renderer
+/// only reacts (resets timers, re-faces) when the driving session actually changes.
+struct Resolution: Equatable {
+    let command: PetCommand
+    let winner: String
+    let activity: Double
+}
+
+enum Arbitration {
+    /// A controller heartbeat older than this (ms) means its session is dead.
+    static let staleAfterMs: Double = 12_000
+
+    /// Sessions still considered alive at `now` (ms since epoch).
+    static func liveSessions(_ sessions: [SessionSnapshot], now: Double) -> [SessionSnapshot] {
+        sessions.filter { now - $0.heartbeat <= staleAfterMs }
+    }
+
+    /// Decide what the shared pet should do.
+    ///
+    /// - Parameters:
+    ///   - sessions: every session state file the pet found.
+    ///   - now: current time in ms since epoch.
+    ///   - hadLiveSessions: whether a live session existed on the previous tick.
+    ///     Used to de-dupe greets — a greet is only honored on the 0→N transition.
+    /// - Returns: `nil` when no session is live (the caller keeps the current pose;
+    ///   the heartbeat watchdog handles termination).
+    static func resolve(_ sessions: [SessionSnapshot], now: Double, hadLiveSessions: Bool) -> Resolution? {
+        let live = liveSessions(sessions, now: now)
+        guard !live.isEmpty else { return nil }
+
+        // Most-recent-activity wins; deterministic id tie-break for stability.
+        let winner = live.max { a, b in
+            a.activity != b.activity ? a.activity < b.activity : a.id < b.id
+        }!
+
+        let command: PetCommand
+        switch winner.mood {
+        case "quit":
+            command = .quit
+        case "hidden":
+            command = .hide
+        default:
+            var mood = Mood(rawValue: winner.mood) ?? .idle
+            // De-dupe greets across processes: a session that boots while others
+            // are already live shows idle instead of a redundant second "hi!".
+            if mood == .greet && hadLiveSessions { mood = .idle }
+            command = .show(mood, message: winner.message)
+        }
+        return Resolution(command: command, winner: winner.id, activity: winner.activity)
+    }
+}
