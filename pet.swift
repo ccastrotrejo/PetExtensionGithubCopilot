@@ -119,19 +119,27 @@ final class PetView: NSView {
         ctx.fillEllipse(in: CGRect(x: cx - shadowW / 2, y: groundY - 8, width: shadowW, height: 9))
         ctx.restoreGState()
 
-        // Pet body
+        // Pet body — crisp pixels: anti-aliasing off, origin snapped to whole
+        // device pixels so no cell lands on a half-pixel (which would blur it).
         ctx.saveGState()
-        ctx.translateBy(x: cx + pose.shakeX, y: cy)
+        ctx.setShouldAntialias(false)
+        ctx.translateBy(x: (cx + pose.shakeX).rounded(), y: cy.rounded())
         if pose.rot != 0 { ctx.rotate(by: pose.rot) }
         ctx.scaleBy(x: 1, y: pose.scaleY)
         drawDachshundPixel(size: petSize, feat: pose.feat, phase: phase)
         ctx.restoreGState()
 
-        // Accessory (pixel-art icon near head)
+        // Accessory (pixel-art icon near head) — same pixel unit as the dog.
         if let acc = pose.accessory {
+            ctx.saveGState()
+            ctx.setShouldAntialias(false)
             let accBob = sin(phase * 4) * 3
-            drawAccessory(acc, at: CGPoint(x: cx + petSize * 0.38,
-                                           y: cy + petSize * 0.36 + accBob), phase: phase)
+            // Most icons hover just above the head; the thought cloud floats
+            // up-and-right so it clears both the head and the speech bubble.
+            let ax = (cx + petSize * (acc == .think ? 0.58 : 0.38)).rounded()
+            let ay = (cy + petSize * (acc == .think ? 0.50 : 0.36) + accBob).rounded()
+            drawAccessory(acc, at: CGPoint(x: ax, y: ay), phase: phase)
+            ctx.restoreGState()
         }
 
         // Speech bubble
@@ -159,7 +167,7 @@ final class PetView: NSView {
     /// (silhouette offset in 4 directions) keeps it readable on any wallpaper.
     private func drawDachshundPixel(size s: CGFloat, feat: DogFeatures, phase: Double) {
         let cell = max(2, (s / 24).rounded())
-        let footY = -0.46 * s
+        let footY = (-0.46 * s).rounded()
 
         func box(_ cx: Int, _ cy: Int, _ w: Int, _ h: Int, _ color: NSColor) {
             color.setFill()
@@ -200,11 +208,13 @@ final class PetView: NSView {
         solids(0, 0, nil)
 
         // 3) shading + details (fill only)
-        box(-9, 9, 16, 1, PetView.cBodyHi)          // warm back highlight
+        box(-9, 9, 16, 1, PetView.cBodyHi)          // warm back highlight (top light)
         box(5, 13, 8, 1, PetView.cBodyHi)           // head highlight
-        box(-9, 5, 16, 1, PetView.cShade)           // cool underside shadow
-        box(-6, 5, 11, 3, PetView.cTan)             // belly patch
-        box(-6, 5, 11, 1, PetView.cTanShade)
+        // Tan underside: a two-tone dachshund — belly along the bottom of the
+        // body plus a chest patch under the neck, not a floating mid-body bar.
+        box(-8, 5, 15, 2, PetView.cTan)             // belly (bottom rows, wide)
+        box(2, 6, 5, 3, PetView.cTan)               // chest under the head
+        box(-8, 5, 15, 1, PetView.cTanShade)        // shadow at the very bottom edge
         for lx in [-8, -4, 3, 6] { box(lx, 0, 3, 1, PetView.cTan) }   // paws
         box(12, 6, 5, 1, PetView.cTanShade)         // muzzle underside
         box(15, 6, 2, 3, PetView.cNose)             // nose
@@ -260,7 +270,7 @@ final class PetView: NSView {
     private static let cPaw       = NSColor(red: 0.90, green: 0.70, blue: 0.48, alpha: 1)
 
     private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double) {
-        let u: CGFloat = 4                      // accessory pixel size
+        let u: CGFloat = 3                      // same pixel unit as the dog body
         func b(_ gx: CGFloat, _ gy: CGFloat, _ w: CGFloat, _ h: CGFloat, _ color: NSColor) {
             color.setFill()
             NSBezierPath(rect: NSRect(x: c.x + gx * u, y: c.y + gy * u,
