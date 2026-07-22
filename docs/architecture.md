@@ -163,15 +163,34 @@ window.styleMask = .borderless
 window.isOpaque = false
 window.backgroundColor = .clear
 window.level = .floating                  // above normal windows
-window.ignoresMouseEvents = false         // catch drags…
-window.isMovableByWindowBackground = true // …to move the pet
+window.ignoresMouseEvents = false         // catch presses on the pet…
 window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 app.setActivationPolicy(.accessory)       // no Dock icon, never steals focus
 ```
 
 The window is small (sized to the pet, not full-screen). `PetView.hitTest` returns the view only over
-the pet's body, so everywhere else stays click-through; dragging the body moves the window and the new
-origin is persisted to `pet.pos` (in the state dir) and restored on launch.
+the pet's body, so everywhere else stays click-through.
+
+## Interacting with the pet — drag, click, and gaze
+
+The pet body is both a drag handle and a pet target, so `PetView` handles the press itself rather than
+relying on `isMovableByWindowBackground` (which would swallow the click/drag distinction):
+
+- **Click to pet** — a press that never travels past `Interaction.dragThreshold` (4 pt) is a *click*: it
+  plays the local `loved` reaction (a blushing wriggle with a ♥). `Interaction` is pure/testable, so the
+  click-vs-drag rule is exercised without a running app.
+- **Drag to move** — once the pointer travels past the threshold the press becomes a window drag; the new
+  origin is persisted to `pet.pos` (in the state dir) and restored on launch. So repositioning the pet
+  never accidentally pets it (issue acceptance criterion).
+- **Look at the cursor** — while the pointer is *near* (polled via `NSEvent.mouseLocation` each idle tick),
+  the pet watches it: the pure `Gaze.toward(dx:dy:size:)` model decides whether the cursor is near, which
+  of the three facings to turn to, and a pupil offset the renderer applies to the eyes (`eyeLook`, mirrored
+  for the left-facing sprite). Autonomous glancing is suspended while watching. Like the automatic
+  look-around, gaze is non-essential motion, so it's gated behind the `lookAround` behavior and suppressed
+  under (effective) Reduce Motion.
+
+`loved` is a *local-only* mood (never on the wire — see [`state-protocol.md`](state-protocol.md)); when it
+ends, `advanceMood` clears `lastKey` so the pet re-syncs to whatever the live session is doing.
 
 `PetView.tick()` polls the state file (~5×/s), runs the mood machine, and redraws — but it isn't driven
 by a fixed-rate `Timer` any more. Instead, `main()` schedules a one-shot `Timer` after every tick, using
@@ -195,9 +214,9 @@ by a fixed-rate `Timer` any more. Instead, `main()` schedules a one-shot `Timer`
   spinning teeth, the sparkle's pulsing size, and the panting tongue's drop are binary/discrete rather than
   continuous, so they're frozen on one frame instead of just scaled down. Expressions — which
   eyes/mouth/accessory/bubble are shown — are never touched, so the pet still reads clearly; only the
-  ambient wobble is dampened. The automatic look-around (turning to face you) is skipped entirely under
-  (effective) Reduce Motion or when the `lookAround` behavior is disabled in `config.json`, as it's the
-  most conspicuous non-essential motion.
+  ambient wobble is dampened. The automatic look-around (turning to face you) and cursor-watching (gaze)
+  are skipped entirely under (effective) Reduce Motion or when the `lookAround` behavior is disabled in
+  `config.json`, as they're the most conspicuous non-essential motion.
 
 The pet is a pixel-art dachshund drawn with Core Graphics as grid-aligned blocks (limited palette), plus
 a pixel-art status icon (gear, sparkle, thought cloud, sweat, Zzz, waving paw), a rounded speech bubble
