@@ -182,6 +182,61 @@ enum PetCoreTests {
         check(calmThinking.accessory == .think && calmThinking.bubble == "thinking…",
               "reduceMotion: keeps thinking accessory + bubble")
 
+        // MARK: Idle antics — pure selection, scheduling, and part-based motion
+        for a in Antic.allCases {
+            check(a.duration > 0, "antic \(a.rawValue): positive duration")
+            check(a.weight > 0, "antic \(a.rawValue): positive weight")
+        }
+
+        // nextGap: clamped, monotonic, spans the relaxed [minGap, maxGap] range.
+        check(IdleAntics.nextGap(random: 0) == IdleAntics.minGap, "antics: nextGap(0) == minGap")
+        check(IdleAntics.nextGap(random: 1) == IdleAntics.maxGap, "antics: nextGap(1) == maxGap")
+        check(IdleAntics.nextGap(random: 0.5) == (IdleAntics.minGap + IdleAntics.maxGap) / 2, "antics: nextGap(.5) is midpoint")
+        check(IdleAntics.nextGap(random: -1) == IdleAntics.minGap && IdleAntics.nextGap(random: 2) == IdleAntics.maxGap,
+              "antics: nextGap clamps out-of-range random")
+
+        // pick: weighted, deterministic at the boundaries, never repeats `avoiding`.
+        check(IdleAntics.pick(random: 0) == .stretch, "antics: pick(0) → first case (stretch)")
+        check(IdleAntics.pick(random: 0.999) == .sit, "antics: pick(≈1) → last case (sit)")
+        check(IdleAntics.pick(random: 0, avoiding: .stretch) == .yawn, "antics: pick(0) skips avoided first → yawn")
+        for a in Antic.allCases {
+            for i in 0..<50 {
+                check(IdleAntics.pick(random: Double(i) / 50.0, avoiding: a) != a,
+                      "antics: pick never returns avoided \(a.rawValue) (r=\(i))")
+            }
+        }
+        var seen = Set<Antic>()
+        for i in 0..<200 { seen.insert(IdleAntics.pick(random: Double(i) / 200.0)) }
+        check(seen.count == Antic.allCases.count, "antics: every antic is reachable across the random range")
+
+        // apply at anticPhase 0 is a no-op — identical to plain idle, so an antic
+        // eases in from rest instead of snapping (never overlaps awkwardly).
+        for a in Antic.allCases {
+            let base = Pose.make(for: .idle, phase: 0.7, message: "")
+            let start = Pose.make(for: .idle, phase: 0.7, message: "", antic: a, anticPhase: 0)
+            check(start.scaleX == base.scaleX && start.scaleY == base.scaleY && start.headBob == base.headBob
+                  && start.headTilt == base.headTilt && start.bob == base.bob && start.tremble == base.tremble
+                  && start.feat.eyes == base.feat.eyes && start.feat.mouth == base.feat.mouth,
+                  "antic \(a.rawValue): anticPhase 0 == plain idle (blends in from rest)")
+        }
+
+        // Per-antic behavior at its peak (anticPhase = duration/2, envelope = 1).
+        func peak(_ a: Antic) -> Pose { Pose.make(for: .idle, phase: 0.85, message: "", antic: a, anticPhase: a.duration / 2) }
+        check(peak(.stretch).scaleX > 1.1 && peak(.stretch).headBob < 0, "antic stretch: body extends, front bows down")
+        check(peak(.yawn).feat.mouth == .yawn && peak(.yawn).feat.eyes == .closed && peak(.yawn).headBob > 0,
+              "antic yawn: mouth gapes, eyes shut, head lifts")
+        check(peak(.scratch).tremble > 0 && peak(.scratch).feat.eyes == .happy, "antic scratch: head buzzes, content eyes")
+        check(peak(.sniff).headBob < 0, "antic sniff: nose to the ground")
+        check(peak(.dig).headBob < 0 && peak(.dig).bob > 0, "antic dig: nose jabs down as the body bobs")
+        check(peak(.chaseTail).headTilt > 0 && peak(.chaseTail).feat.wag >= 12, "antic chaseTail: head cranes back, fast wag")
+        check(peak(.sit).scaleY < 1 && peak(.sit).headBob > 0, "antic sit: settles down, head held high")
+
+        // Antics apply only in idle, and never under Reduce Motion.
+        check(Pose.make(for: .working, phase: 0.85, message: "", antic: .stretch, anticPhase: 1.0).scaleX == 1,
+              "antics: a real mood ignores antics (no scaleX)")
+        let calmAntic = Pose.make(for: .idle, phase: 0.85, message: "", reduceMotion: true, antic: .stretch, anticPhase: 1.0)
+        check(calmAntic.scaleX == 1 && calmAntic.headBob == 0, "antics: Reduce Motion suppresses antics")
+
         // MARK: Arbitration — multi-session, one shared pet
         let base = 1_000_000.0  // arbitrary "now" in ms
         func snap(_ id: String, _ mood: String, activity: Double, heartbeat: Double = 0, msg: String = "") -> SessionSnapshot {

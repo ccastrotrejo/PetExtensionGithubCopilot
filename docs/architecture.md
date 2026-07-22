@@ -149,6 +149,10 @@ The renderer owns transient/auto transitions so the controller only sends discre
 - `worried` → `idle` after 2.4s
 - `thinking` / `working` → persist until the next event (no auto transition)
 - `idle` → `sleeping` after 18s with no new winning event
+- while `idle`, the pet occasionally performs a short **antic** (stretch, yawn, scratch, sniff, dig,
+  chase-tail, sit) at relaxed 6–15s intervals — autonomous local variety, not a wire mood. Any real mood
+  cancels it and Reduce Motion suppresses it, so an antic never fights an expression. The weighted
+  selection + scheduling is the pure, unit-tested `Antic` / `IdleAntics` in `PetCore.swift`.
 - a new winning `(id, activity)` → wake + adopt that session's mood
 - winner `mood: "quit"` → `NSApp.terminate`; winner `mood: "hidden"` → `orderOut`
 

@@ -14,7 +14,7 @@ glances around on its own — looking left, right, or straight at you.
 | Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) |
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
-| Goes idle | 🐶 waits (gentle breathing), then 😴 **sleeps** after ~18s |
+| Goes idle | 🐶 waits (gentle breathing) with occasional antics — a stretch, yawn, ear-scratch, sniff, dig, tail-chase or sit — then 😴 **sleeps** after ~18s |
 
 ## Animation & accessibility
 
