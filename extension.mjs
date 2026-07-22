@@ -11,14 +11,20 @@ import path from "node:path";
 
 const extDir = path.dirname(fileURLToPath(import.meta.url));
 const petSrc = path.join(extDir, "pet.swift");
+const petCoreSrc = path.join(extDir, "PetCore.swift");
 const binDir = path.join(extDir, ".bin");
 const petBin = path.join(binDir, "pet");
 
 // Single source of truth for the mood protocol across the state-file seam.
-// Mirrored by the `Mood` enum in pet.swift and documented in docs/state-protocol.md.
+// Mirrored by the `Mood` enum in PetCore.swift and documented in docs/state-protocol.md.
+const MOOD = {
+  greet: "greet", thinking: "thinking", working: "working", happy: "happy",
+  worried: "worried", idle: "idle", sleeping: "sleeping",
+  hidden: "hidden", quit: "quit",
+};
 const MOODS = {
-  display: ["greet", "thinking", "working", "happy", "worried", "idle", "sleeping"],
-  control: ["hidden", "quit"],
+  display: [MOOD.greet, MOOD.thinking, MOOD.working, MOOD.happy, MOOD.worried, MOOD.idle, MOOD.sleeping],
+  control: [MOOD.hidden, MOOD.quit],
 };
 
 const stateDir = path.join(os.tmpdir(), "copilot-pet");
@@ -31,7 +37,7 @@ fs.mkdirSync(binDir, { recursive: true });
 
 // Keep seq monotonically increasing across reloads so a reused pet picks up changes.
 let seq = readExistingSeq();
-let current = { mood: "greet", message: "" };
+let current = { mood: MOOD.greet, message: "" };
 
 function readExistingSeq() {
   try {
@@ -76,12 +82,32 @@ function pidAlive(pid) {
   }
 }
 
+function readPid() {
+  try {
+    return parseInt(fs.readFileSync(pidPath, "utf8").trim(), 10);
+  } catch {
+    return 0;
+  }
+}
+
+// Wait (up to timeoutMs) for a pid to exit — used on restart so we never spawn
+// a second pet before the previous one has released its single-instance lock.
+async function waitForExit(pid, timeoutMs) {
+  if (!pid) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && pidAlive(pid)) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 function ensureCompiled() {
-  const needsBuild =
-    !fs.existsSync(petBin) ||
-    fs.statSync(petSrc).mtimeMs > fs.statSync(petBin).mtimeMs;
+  const newestSrc = Math.max(
+    fs.statSync(petSrc).mtimeMs,
+    fs.statSync(petCoreSrc).mtimeMs,
+  );
+  const needsBuild = !fs.existsSync(petBin) || newestSrc > fs.statSync(petBin).mtimeMs;
   if (!needsBuild) return { ok: true };
-  const res = spawnSync("swiftc", ["pet.swift", "-o", ".bin/pet"], {
+  const res = spawnSync("swiftc", ["pet.swift", "PetCore.swift", "-o", ".bin/pet"], {
     cwd: extDir,
     encoding: "utf8",
     timeout: 120000,
@@ -135,7 +161,7 @@ if (!build.ok) {
 } else {
   try {
     ensureRunning();
-    setMood("greet");
+    setMood(MOOD.greet);
   } catch (e) {
     bootError = e.message;
   }
@@ -173,29 +199,30 @@ const petControl = {
     const { action, mood, message } = args || {};
     switch (action) {
       case "mood":
-        setMood(mood || "idle", message || "");
-        return `Pet mood set to "${mood || "idle"}".`;
+        setMood(mood || MOOD.idle, message || "");
+        return `Pet mood set to "${mood || MOOD.idle}".`;
       case "say":
-        setMood("thinking", message || "");
+        setMood(MOOD.thinking, message || "");
         return `Pet says: ${message || ""}`;
       case "show":
-        setMood("idle");
+        setMood(MOOD.idle);
         return "Pet is visible.";
       case "hide":
-        setMood("hidden");
+        setMood(MOOD.hidden);
         return "Pet hidden.";
       case "quit":
-        setMood("quit");
+        setMood(MOOD.quit);
         try { fs.rmSync(pidPath, { force: true }); } catch {}
         return "Pet dismissed.";
       case "restart": {
-        setMood("quit");
+        const oldPid = readPid();
+        setMood(MOOD.quit);
+        await waitForExit(oldPid, 2000);   // let the old pet release its lock
         try { fs.rmSync(pidPath, { force: true }); } catch {}
-        await new Promise((r) => setTimeout(r, 400));
         const b = ensureCompiled();
         if (!b.ok) return `Failed to recompile pet: ${b.error}`;
         ensureRunning();
-        setMood("greet");
+        setMood(MOOD.greet);
         return "Pet restarted.";
       }
       default:
@@ -207,24 +234,24 @@ const petControl = {
 const session = await joinSession({
   tools: [petControl],
   hooks: {
-    onSessionStart: async () => { setMood("greet"); },
-    onUserPromptSubmitted: async () => { setMood("thinking"); },
+    onSessionStart: async () => { setMood(MOOD.greet); },
+    onUserPromptSubmitted: async () => { setMood(MOOD.thinking); },
     onPreToolUse: async (input) => {
       // Don't let the pet react to its own control tool.
       if (input?.toolName === "pet_control") return;
-      setMood("working", prettyTool(input?.toolName));
+      setMood(MOOD.working, prettyTool(input?.toolName));
     },
     onPostToolUse: async (input) => {
       if (input?.toolName === "pet_control") return;
-      setMood("happy");
+      setMood(MOOD.happy);
     },
-    onPostToolUseFailure: async () => { setMood("worried"); },
-    onErrorOccurred: async () => { setMood("worried"); },
+    onPostToolUseFailure: async () => { setMood(MOOD.worried); },
+    onErrorOccurred: async () => { setMood(MOOD.worried); },
   },
 });
 
 // Idle event -> pet relaxes (and drifts to sleep after a while).
-session.on("session.idle", () => { setMood("idle"); });
+session.on("session.idle", () => { setMood(MOOD.idle); });
 
 if (bootError) {
   await session.log(`🐾 Copilot pet couldn't start: ${bootError}`, { level: "warning" });

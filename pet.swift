@@ -7,84 +7,8 @@
 
 import Cocoa
 
-// MARK: - Mood (typed vocabulary)
-// Mirrors the MOODS manifest in extension.mjs and docs/state-protocol.md.
-// Control signals "hidden" / "quit" travel over the same wire but are handled
-// in loadState() before mapping to a Mood, so they never become render state.
-
-enum Mood: String {
-    case greet, thinking, working, happy, worried, idle, sleeping
-
-    /// Automatic transition after a mood has been shown for `after` seconds.
-    var autoNext: (after: TimeInterval, to: Mood)? {
-        switch self {
-        case .greet:   return (1.6, .idle)
-        case .happy:   return (1.3, .thinking)
-        case .worried: return (2.4, .thinking)
-        case .idle:    return (18,  .sleeping)
-        default:       return nil
-        }
-    }
-}
-
-// MARK: - Expression model
-
-enum EyeState { case open, closed, happy, worried }
-enum MouthState { case neutral, smile, pant, open }
-enum Accessory { case wave, think, gear, sparkle, sweat, sleep }
-
-struct DogFeatures {
-    var eyes: EyeState = .open
-    var mouth: MouthState = .smile
-    var wag: Double = 2          // tail-wag speed (0 = still)
-    var tailDown: Bool = false   // tuck the tail (worried)
-}
-
-// MARK: - Pose (deep module: a mood decodes to everything needed to render)
-
-struct Pose {
-    var bob: CGFloat = 0
-    var rot: CGFloat = 0
-    var shakeX: CGFloat = 0
-    var scaleY: CGFloat = 1
-    var accessory: Accessory? = nil
-    var bubble: String? = nil
-    var feat = DogFeatures()
-
-    static func make(for mood: Mood, phase: Double, message: String) -> Pose {
-        var p = Pose()
-        switch mood {
-        case .idle:
-            p.scaleY = 1 + sin(phase * 2.2) * 0.02          // gentle breathing, in place
-            p.feat = DogFeatures(eyes: .open, mouth: .smile, wag: 2)
-        case .sleeping:
-            p.scaleY = 1 + sin(phase * 2) * 0.03
-            p.feat = DogFeatures(eyes: .closed, mouth: .neutral, wag: 0)
-            p.accessory = .sleep
-        case .greet:
-            p.bob = abs(sin(phase * 8)) * 10
-            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 11)
-            p.accessory = .wave; p.bubble = "hi!"
-        case .thinking:
-            p.rot = sin(phase * 3) * 0.06
-            p.feat = DogFeatures(eyes: .open, mouth: .neutral, wag: 1)
-            p.accessory = .think; p.bubble = message.isEmpty ? "thinking…" : message
-        case .working:
-            p.bob = abs(sin(phase * 12)) * 6
-            p.feat = DogFeatures(eyes: .open, mouth: .pant, wag: 5)
-            p.accessory = .gear; p.bubble = message.isEmpty ? "working…" : message
-        case .happy:
-            p.bob = abs(sin(phase * 10)) * 16
-            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
-            p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
-        case .worried:
-            p.shakeX = sin(phase * 30) * 4
-            p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
-            p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
-        }
-        return p
-    }
-}
+// The pure model (Mood, Pose, DogFeatures, Accessory, EyeState, MouthState)
+// lives in PetCore.swift and is compiled into the same module.
 
 // MARK: - Shared animation state
 
@@ -447,45 +371,69 @@ func writePos(_ o: CGPoint, _ path: String) {
 
 // MARK: - App bootstrap
 
-guard CommandLine.arguments.count >= 2 else {
-    FileHandle.standardError.write("usage: pet <state.json>\n".data(using: .utf8)!)
-    exit(2)
+@main
+enum PetApp {
+    static func main() {
+        guard CommandLine.arguments.count >= 2 else {
+            FileHandle.standardError.write("usage: pet <state.json>\n".data(using: .utf8)!)
+            exit(2)
+        }
+        let statePath = CommandLine.arguments[1]
+        let posPath = (statePath as NSString).deletingLastPathComponent + "/pet.pos"
+
+        // Single-instance: hold an exclusive lock for the process lifetime. A second
+        // pet (from a restart race or a concurrent session) fails to acquire it and
+        // exits immediately, so only one dog is ever on screen.
+        let lockPath = (statePath as NSString).deletingLastPathComponent + "/pet.lock"
+        let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+            exit(0)
+        }
+
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+
+        let state = PetState(statePath: statePath)
+
+        let winSize = CGSize(width: 200, height: 170)
+        var origin = CGPoint(x: 200, y: 200)
+        if let screen = NSScreen.main {
+            let vf = screen.visibleFrame
+            origin = CGPoint(x: vf.maxX - winSize.width - 40, y: vf.minY + 60)
+        }
+        // Restore the saved position only if it still lands on a connected screen —
+        // otherwise a pet persisted off a now-disconnected display would be unreachable.
+        if let saved = readPos(posPath),
+           NSScreen.screens.contains(where: { $0.frame.intersects(CGRect(origin: saved, size: winSize)) }) {
+            origin = saved
+        }
+
+        let window = NSWindow(contentRect: CGRect(origin: origin, size: winSize),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.level = .floating
+        window.ignoresMouseEvents = false
+        window.isMovableByWindowBackground = true
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+
+        let view = PetView(frame: CGRect(origin: .zero, size: winSize), state: state)
+        window.contentView = view
+        window.orderFrontRegardless()
+
+        // Persist the position after the drag settles (debounced), not on every frame.
+        var posSaveWork: DispatchWorkItem?
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { _ in
+            posSaveWork?.cancel()
+            let work = DispatchWorkItem { writePos(window.frame.origin, posPath) }
+            posSaveWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        }
+
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { _ in view.tick() }
+        RunLoop.main.add(timer, forMode: .common)
+
+        app.run()
+    }
 }
-let statePath = CommandLine.arguments[1]
-let posPath = (statePath as NSString).deletingLastPathComponent + "/pet.pos"
-
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-
-let state = PetState(statePath: statePath)
-
-let winSize = CGSize(width: 200, height: 170)
-var origin = CGPoint(x: 200, y: 200)
-if let screen = NSScreen.main {
-    let vf = screen.visibleFrame
-    origin = CGPoint(x: vf.maxX - winSize.width - 40, y: vf.minY + 60)
-}
-if let saved = readPos(posPath) { origin = saved }
-
-let window = NSWindow(contentRect: CGRect(origin: origin, size: winSize),
-                     styleMask: .borderless, backing: .buffered, defer: false)
-window.isOpaque = false
-window.backgroundColor = .clear
-window.hasShadow = false
-window.level = .floating
-window.ignoresMouseEvents = false
-window.isMovableByWindowBackground = true
-window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-
-let view = PetView(frame: CGRect(origin: .zero, size: winSize), state: state)
-window.contentView = view
-window.orderFrontRegardless()
-
-NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { _ in
-    writePos(window.frame.origin, posPath)
-}
-
-let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { _ in view.tick() }
-RunLoop.main.add(timer, forMode: .common)
-
-app.run()
