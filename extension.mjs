@@ -120,7 +120,11 @@ function resultText(r) {
 // Common test-runner invocations. Watch modes never exit, so onPostToolUse won't
 // fire for them — no special-casing needed.
 const TEST_CMD = /\b(npm (run )?test|yarn (run )?test|pnpm (run )?test|jest|vitest|mocha|pytest|py\.test|tox|go test|cargo test|swift test|dotnet test|mvn test|gradle(w)? test|\.\/gradlew test|rspec|phpunit|ctest|make test|bun test|deno test)\b/;
-const TEST_FAIL = /\b(FAIL(ED|ING|URE)?|✗|✘|assert(ion)?\s+error|traceback|\d+\s+fail(ed|ures?)|exit code [1-9])\b/i;
+// Signals that a *successful* tool call actually reported test failures (bash
+// tool success ≠ exit 0). Keys on a NONZERO failure count so success summaries
+// that print "0 failures" / "0 failing" (rspec, mocha, swift…) aren't mistaken
+// for failures. The word alone is too broad — "0 failures" must still celebrate.
+const TEST_FAIL = /([1-9]\d*)\s+(fail(ed|ures?|ing)|errors?)\b|✗|✘|\btraceback\b|exit code [1-9]/i;
 
 // Map a *successful* tool call to a milestone, or null. Kept conservative so it
 // stays a rare, delightful signal rather than noise.
@@ -391,7 +395,10 @@ const session = await joinSession({
         setMood(MOOD.celebrate, milestone); // instant feedback; re-asserted at idle
       }
     },
-    onPostToolUseFailure: async () => { setMood(MOOD.worried); },
+    onPostToolUseFailure: async () => {
+      celebration = null; // a later failure outranks an earlier milestone this turn
+      setMood(MOOD.worried);
+    },
     onErrorOccurred: async () => { setMood(MOOD.worried); },
   },
 });
