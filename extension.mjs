@@ -40,7 +40,6 @@ const logPath = path.join(stateDir, "pet.log");
 // A stable id for this controller process. One extension.mjs == one session.
 const sessionId = randomUUID();
 const sessionPath = path.join(sessionsDir, `${sessionId}.json`);
-const STALE_MS = 12_000; // matches Arbitration.staleAfterMs in PetCore.swift
 
 fs.mkdirSync(stateDir, { recursive: true });
 fs.mkdirSync(sessionsDir, { recursive: true });
