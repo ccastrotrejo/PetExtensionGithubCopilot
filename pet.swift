@@ -73,6 +73,79 @@ final class PetView: NSView {
         return petBBox().contains(point) ? self : nil
     }
 
+    // MARK: Mouse — manual drag + double-click to open the host app.
+    //
+    // We take full control of the mouse (rather than relying on the window's
+    // `isMovableByWindowBackground`) so a double-click is *reliably* delivered
+    // to this view: with background-drag, the window consumes the click and the
+    // view's `mouseDown` may never fire. `mouseDownCanMoveWindow = false` keeps
+    // the window from moving itself; we move it by hand in `mouseDragged`.
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Default host: the GitHub Copilot app that spawns the pet.
+    private static let defaultHostBundleId = "com.github.githubapp"
+
+    private var dragMouseStart: NSPoint = .zero    // screen coords at mouse-down
+    private var dragWindowStart: NSPoint = .zero   // window origin at mouse-down
+
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            openHostApp()
+            return
+        }
+        dragMouseStart = NSEvent.mouseLocation
+        dragWindowStart = window?.frame.origin ?? .zero
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let win = window else { return }
+        let cur = NSEvent.mouseLocation
+        win.setFrameOrigin(NSPoint(x: dragWindowStart.x + (cur.x - dragMouseStart.x),
+                                   y: dragWindowStart.y + (cur.y - dragMouseStart.y)))
+    }
+
+    /// Launch or focus the app configured by `openOnDoubleClick` (default: the
+    /// GitHub Copilot host app). Launches it if it isn't running, otherwise
+    /// brings it to the front.
+    private func openHostApp() {
+        switch state.config.doubleClickAction {
+        case .disabled:
+            return
+        case .openDefaultHost:
+            activateApp(bundleId: Self.defaultHostBundleId)
+        case .openBundleId(let id):
+            activateApp(bundleId: id)
+        case .openApp(let nameOrPath):
+            activateApp(nameOrPath: nameOrPath)
+        }
+    }
+
+    private func activateApp(bundleId: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return }
+        activate(url: url)
+    }
+
+    private func activateApp(nameOrPath: String) {
+        let url: URL?
+        if nameOrPath.hasSuffix(".app") || nameOrPath.contains("/") {
+            url = URL(fileURLWithPath: nameOrPath)
+        } else {
+            // Bare app name: look in the standard Applications directories.
+            let name = nameOrPath.hasSuffix(".app") ? nameOrPath : "\(nameOrPath).app"
+            let dirs = FileManager.default.urls(for: .applicationDirectory, in: [.localDomainMask, .userDomainMask])
+            url = dirs.map { $0.appendingPathComponent(name) }
+                      .first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        guard let appURL = url, FileManager.default.fileExists(atPath: appURL.path) else { return }
+        activate(url: appURL)
+    }
+
+    private func activate(url: URL) {
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg, completionHandler: nil)
+    }
+
     // MARK: Cadence — Reduce Motion + visibility
 
     /// Live read of the OS accessibility setting, checked every tick so the
@@ -775,7 +848,7 @@ enum PetApp {
         window.hasShadow = false
         window.level = .floating
         window.ignoresMouseEvents = false
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false   // PetView drags the window by hand
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 
         let view = PetView(frame: CGRect(origin: .zero, size: winSize), state: state)

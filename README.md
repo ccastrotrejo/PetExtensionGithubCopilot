@@ -2,7 +2,8 @@
 
 A native macOS desktop companion (inspired by [pets-therapy.com](https://pets-therapy.com/)) that
 reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot extension** and renders a
-**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered). It
+**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered).
+**Double-click it** to jump to the GitHub Copilot app (configurable — see `openOnDoubleClick`). It
 glances around on its own — looking left, right, or straight at you.
 
 ![The pet across its seven moods](assets/preview.png)
@@ -87,6 +88,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | `muted` | `false` | Suppress all speech bubbles. |
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` | `dachshund` | Reserved for personalization (parsed, only the dachshund is drawn). |
+| `openOnDoubleClick` | `""` | What double-clicking the pet opens. Empty = the GitHub Copilot app; or a bundle id / app name / path, or `"none"` to disable. |
 
 Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
 reference: [`docs/config.md`](docs/config.md).
@@ -96,10 +98,10 @@ reference: [`docs/config.md`](docs/config.md).
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig` (no AppKit). Unit-tested. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, and the `Behavior` composition pipeline (`PetBehaviors`), no AppKit. Unit-tested. |
 | `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
 | `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse`. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
@@ -109,6 +111,7 @@ reference: [`docs/config.md`](docs/config.md).
 - [`docs/copilot-extensions.md`](docs/copilot-extensions.md) — how Copilot extensions work (architecture, discovery, lifecycle).
 - [`docs/sdk-reference.md`](docs/sdk-reference.md) — the `@github/copilot-sdk` API: `joinSession`, hooks, session object, events.
 - [`docs/architecture.md`](docs/architecture.md) — this pet's design, IPC protocol, and decisions.
+- [`docs/behaviors.md`](docs/behaviors.md) — the behavior-composition system: how frames are built and how to add a behavior.
 - [`docs/development.md`](docs/development.md) — how to modify, compile, test, and debug.
 
 ## Auto-cleanup

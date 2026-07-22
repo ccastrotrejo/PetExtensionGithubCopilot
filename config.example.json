@@ -7,5 +7,6 @@
   "reduceMotion": false,
   "breed": "dachshund",
   "palette": "chestnut",
-  "name": ""
+  "name": "",
+  "openOnDoubleClick": ""
 }

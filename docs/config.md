@@ -37,6 +37,7 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `palette` | string | `"chestnut"` | Coat colour scheme. One of `chestnut` (red-and-tan), `black-and-tan`, `red`, or `cream`. Matched case-insensitively; an unknown name falls back to `chestnut`. |
 | `name` | string | `""` | Give the pet a name. Shown subtly: on hover (tooltip) and in its greeting when a session starts ("hi, I'm …!"). Trimmed to 24 characters. |
 | `breed` | string | `"dachshund"` | **Reserved** for the personalization work. Parsed and stored today, but only the dachshund is drawn. |
+| `openOnDoubleClick` | string | `""` | What **double-clicking the pet** opens. Empty (default) launches/focuses the **GitHub Copilot host app** that spawned the pet. Set a bundle id (`"com.github.githubapp"`), an app name (`"Copilot"`) or full path (`"/Applications/Copilot.app"`) to target something else, or `"none"`/`"off"` to disable double-click entirely. Single-click-drag still moves the pet regardless. |
 
 ## Examples
 
