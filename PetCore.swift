@@ -28,7 +28,7 @@ enum Mood: String {
 // MARK: - Expression model
 
 enum EyeState { case open, closed, happy, worried }
-enum MouthState { case neutral, smile, pant, open }
+enum MouthState { case neutral, smile, pant, open, yawn }
 enum Accessory { case wave, think, gear, sparkle, sweat, sleep }
 
 /// Which way the dog is looking. The pet turns at random intervals so it feels
@@ -63,6 +63,7 @@ struct DogFeatures {
 struct Pose {
     var bob: CGFloat = 0        // whole-body hop (a genuine jump leaves the ground)
     var scaleY: CGFloat = 1     // whole-body breathing / landing squash
+    var scaleX: CGFloat = 1     // whole-body horizontal stretch (the long-dog stretch antic)
     var headTilt: CGFloat = 0   // radians — tilt just the head (curious)
     var headBob: CGFloat = 0    // head vertical offset in cells (+ up / − nose-down sniff)
     var tremble: CGFloat = 0    // head jitter amplitude in cells (fear)
@@ -70,7 +71,8 @@ struct Pose {
     var bubble: String? = nil
     var feat = DogFeatures()
 
-    static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false) -> Pose {
+    static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false,
+                     antic: Antic? = nil, anticPhase: Double = 0) -> Pose {
         var p = Pose()
         switch mood {
         case .idle:
@@ -112,6 +114,13 @@ struct Pose {
             p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
             p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
         }
+        // Idle antics: occasional autonomous flourishes (stretch, yawn, sniff…)
+        // layered onto the calm idle pose. Only in idle and never under Reduce
+        // Motion, so a real mood's expression always takes precedence — an antic
+        // never fights a mood.
+        if mood == .idle, let antic = antic, !reduceMotion {
+            antic.apply(&p, anticPhase: anticPhase)
+        }
         // Reduce Motion (accessibility): keep the expression — eyes, mouth,
         // accessory, bubble — but hold the pet still by zeroing every motion field.
         // Phase-driven micro-motions (blink, ear flap, panting, accessory wiggle)
@@ -119,12 +128,130 @@ struct Pose {
         if reduceMotion {
             p.bob = 0
             p.scaleY = 1
+            p.scaleX = 1
             p.headTilt = 0
             p.headBob = 0
             p.tremble = 0
             p.feat.wag = 0
         }
         return p
+    }
+}
+
+// MARK: - Idle antics (autonomous idle variety)
+//
+// Plain idle is calm breathing. To keep the pet from feeling too predictable,
+// it occasionally performs a short antic — a stretch, a yawn, an ear scratch —
+// at relaxed intervals. Antics are purely *local* liveliness: they are not on
+// the wire, an agent cannot request them, and they play only while the mood is
+// `idle` (any real mood cancels them, and Reduce Motion suppresses them). The
+// selection + scheduling is pure and unit-tested here; the renderer only drives
+// the clock and draws the resulting Pose.
+
+/// One idle flourish. Each reuses the existing head/body split in `Pose` rather
+/// than moving the whole sprite, so it stays crisp and genuine.
+enum Antic: String, CaseIterable {
+    case stretch, yawn, scratch, sniff, dig, chaseTail, sit
+
+    /// Seconds the antic plays before the pet settles back to plain idle.
+    var duration: Double {
+        switch self {
+        case .stretch:   return 1.9
+        case .yawn:      return 1.5
+        case .scratch:   return 1.7
+        case .sniff:     return 2.2
+        case .dig:       return 1.7
+        case .chaseTail: return 1.7
+        case .sit:       return 2.4
+        }
+    }
+
+    /// Relative likelihood in the weighted pick — calm antics are commoner and
+    /// energetic ones rarer, so idle stays mostly serene.
+    var weight: Double {
+        switch self {
+        case .stretch:   return 1.4
+        case .yawn:      return 1.3
+        case .sniff:     return 1.2
+        case .sit:       return 1.1
+        case .scratch:   return 1.0
+        case .dig:       return 0.7
+        case .chaseTail: return 0.6
+        }
+    }
+
+    /// Overlay this antic's part-based motion onto an idle `Pose`. `anticPhase`
+    /// is seconds since the antic began (0…`duration`). A `sin(πu)` envelope
+    /// ramps every antic up from — and back down to — the resting idle pose, so
+    /// it blends in and out without a jump. Discrete expression changes (closed
+    /// eyes, open mouth, …) are gated behind the envelope for the same reason:
+    /// at `anticPhase == 0` an antic is a no-op, identical to plain idle.
+    func apply(_ p: inout Pose, anticPhase: Double) {
+        let u = max(0, min(1, anticPhase / duration))
+        let env = sin(.pi * u)              // 0 → 1 → 0
+        let e = CGFloat(env)
+        let t = anticPhase
+        switch self {
+        case .stretch:
+            // A long dachshund stretch: the body extends and the front bows down.
+            p.scaleX = 1 + 0.18 * e
+            p.scaleY -= 0.05 * e
+            p.headBob = -1.3 * e
+        case .yawn:
+            // Head lifts, eyes scrunch shut and the mouth gapes at the peak.
+            p.headBob = 0.5 * e
+            if env > 0.5 { p.feat.eyes = .closed; p.feat.mouth = .yawn }
+        case .scratch:
+            // Head cocks to one side and buzzes as a hind leg thumps the ear.
+            p.headTilt = 0.16 * e
+            p.tremble = 0.5 * e
+            if env > 0.25 { p.feat.eyes = .happy }
+        case .sniff:
+            // Nose to the ground, sweeping slowly side to side.
+            p.headBob = -1.6 * e
+            p.headTilt = CGFloat(sin(t * 3.2) * 0.09) * e
+        case .dig:
+            // Quick, eager digging — the nose jabs down as the body bobs.
+            let fast = abs(sin(t * 12))
+            p.headBob = CGFloat(-0.7 - fast * 0.8) * e
+            p.bob = CGFloat(fast * 3) * e
+            if env > 0.25 { p.feat.mouth = .pant }
+        case .chaseTail:
+            // Spins after its own tail: head cranes back, little hops, fast wag.
+            p.headTilt = 0.30 * e
+            p.bob = CGFloat(abs(sin(t * 7)) * 6) * e
+            if env > 0.25 { p.feat.wag = 12 }
+        case .sit:
+            // Settles onto its haunches, head held high and calm.
+            p.scaleY -= 0.09 * e
+            p.headBob = 0.35 * e
+            if env > 0.25 { p.feat.wag = 1 }
+        }
+    }
+}
+
+/// Pure scheduling + weighted selection for idle antics. No time source or RNG
+/// of its own — the caller supplies the clock and uniform random values — so it
+/// is fully deterministic under test.
+enum IdleAntics {
+    /// Relaxed gap between antics, in seconds. Idle should feel calm, not busy.
+    static let minGap: Double = 6
+    static let maxGap: Double = 15
+
+    /// Seconds until the next antic, from a uniform random value in [0, 1).
+    static func nextGap(random r: Double) -> Double {
+        minGap + max(0, min(1, r)) * (maxGap - minGap)
+    }
+
+    /// Weighted-random antic for `random` in [0, 1), never repeating `avoiding`
+    /// so the pet doesn't perform the same trick twice in a row.
+    static func pick(random r: Double, avoiding: Antic? = nil) -> Antic {
+        let opts = Antic.allCases.filter { $0 != avoiding }
+        let total = opts.reduce(0) { $0 + $1.weight }
+        let pick = max(0, min(1, r)) * total
+        var acc = 0.0
+        for a in opts { acc += a.weight; if pick < acc { return a } }
+        return opts.last!
     }
 }
 

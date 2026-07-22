@@ -28,6 +28,10 @@ final class PetState {
     var config = PetConfig()          // user settings (hot-reloaded from config.json)
     var configPath: String = ""
     var configMTime: Double = -1      // last-seen config.json mtime; -1 = absent
+    var antic: Antic? = nil           // idle flourish currently playing (nil = plain idle)
+    var lastAntic: Antic? = nil       // last antic played, so we don't repeat it back-to-back
+    var anticStart: Double = 0        // phase clock when the current antic began
+    var nextAntic: Double = 0         // phase clock at which the next antic fires (0 = disarmed)
 
     init(statePath: String) {
         self.statePath = statePath
@@ -88,6 +92,7 @@ final class PetView: NSView {
         }
 
         advanceMood(now: now)
+        updateAntics()
         needsDisplay = true
     }
 
@@ -205,6 +210,30 @@ final class PetView: NSView {
         }
     }
 
+    /// Schedule and expire idle antics. Antics enliven the calm `idle` mood only:
+    /// any real mood — or Reduce Motion — cancels the current antic and disarms
+    /// the scheduler, which re-arms on the next return to idle. Timing runs on the
+    /// animation `phase` clock so it matches the pose the renderer draws.
+    private func updateAntics() {
+        let clock = state.phase
+        guard state.mood == .idle, !state.config.reduceMotion else {
+            state.antic = nil
+            state.nextAntic = 0
+            return
+        }
+        if let a = state.antic {
+            if clock - state.anticStart >= a.duration { state.antic = nil }   // finished → back to idle
+        } else if state.nextAntic == 0 {
+            state.nextAntic = clock + IdleAntics.nextGap(random: .random(in: 0..<1))   // arm the next gap
+        } else if clock >= state.nextAntic {
+            let a = IdleAntics.pick(random: .random(in: 0..<1), avoiding: state.lastAntic)
+            state.antic = a
+            state.lastAntic = a
+            state.anticStart = clock
+            state.nextAntic = 0    // re-armed once this antic ends
+        }
+    }
+
     // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -214,8 +243,10 @@ final class PetView: NSView {
         let W = bounds.width
         let phase = state.phase
         let animate = !state.config.reduceMotion
+        let anticPhase = state.antic != nil ? max(0, phase - state.anticStart) : 0
         let pose = Pose.make(for: state.mood, phase: phase, message: state.message,
-                             reduceMotion: state.config.reduceMotion)
+                             reduceMotion: state.config.reduceMotion,
+                             antic: state.antic, anticPhase: anticPhase)
 
         let cx = bounds.midX
         let cy = groundY + petSize * 0.5 + pose.bob
@@ -241,7 +272,7 @@ final class PetView: NSView {
         ctx.saveGState()
         ctx.setShouldAntialias(false)
         ctx.translateBy(x: cx.rounded(), y: cy.rounded())
-        ctx.scaleBy(x: state.facing == .left ? -1 : 1, y: pose.scaleY)
+        ctx.scaleBy(x: (state.facing == .left ? -1 : 1) * pose.scaleX, y: pose.scaleY)
         if state.facing == .front {
             drawDachshundFront(size: petSize, pose: pose, phase: phase, animate: animate)
         } else {
@@ -440,6 +471,9 @@ final class PetView: NSView {
                 let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
                 box(-1, 6 - drop, 2, 1 + drop, PetView.cTongue)
             }
+        case .yawn:
+            box(-2, 6, 4, 3, PetView.cNose)          // wide gaping muzzle
+            box(-1, 6, 2, 1, PetView.cTongue)        // tongue at the base
         }
         ctx.restoreGState()
     }
@@ -475,6 +509,9 @@ final class PetView: NSView {
                 let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
                 box(18, 2 - drop, 2, 1 + drop, PetView.cTongue)
             }
+        case .yawn:
+            box(18, 2, 4, 3, PetView.cNose)          // wide gaping muzzle
+            box(19, 2, 2, 1, PetView.cTongue)        // tongue at the base
         }
     }
 
