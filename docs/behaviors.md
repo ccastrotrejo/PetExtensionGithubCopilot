@@ -17,7 +17,8 @@ kept over the existing pure/testable `Pose`/`Mood` core (see issue #6).
 | `Behavior` | Protocol: `apply(to pose: inout Pose, _ ctx: BehaviorContext)`. Side-effect-light — mutates the pose, reads only the context. No IO, no globals. |
 | `MoodExpression` | The deep module: a mood decodes to breathing, hops, head motion, eyes/mouth/tail, accessory, and bubble. |
 | `IdleAnticLayer` | Overlays the current idle antic (stretch, yawn, sniff…) onto the calm idle pose. Only in `idle`, never under Reduce Motion. |
-| `PetBehaviors` | The pipeline (`[MoodExpression(), IdleAnticLayer()]`) and `render(_:through:)`, the composition entry point. |
+| `WalkCycle` | Roam mode: while the pet is walking it gets a trotting bob, a lively tail and a panting tongue, and publishes `Pose.walk` so `draw()` animates the legs. A no-op unless `ctx.walking`. |
+| `PetBehaviors` | The pipeline (`[MoodExpression(), IdleAnticLayer(), WalkCycle()]`) and `render(_:through:)`, the composition entry point. |
 
 `Pose.make(...)` is a thin, stable adapter: it packages its arguments into a
 `BehaviorContext` and calls `PetBehaviors.render`. Keeping its signature means
@@ -31,7 +32,7 @@ let ctx = BehaviorContext(mood: mood, phase: phase, message: message,
                           reduceMotion: reduceMotion,
                           motionScale: reduceMotion ? Pose.reducedMotionScale : 1,
                           antic: antic, anticPhase: anticPhase)
-let pose = PetBehaviors.render(ctx)   // == [MoodExpression(), IdleAnticLayer()]
+let pose = PetBehaviors.render(ctx)   // == [MoodExpression(), IdleAnticLayer(), WalkCycle()]
 ```
 
 `render` seeds a fresh `Pose` with `motionScale` (so every behavior sees the same
@@ -56,7 +57,8 @@ context always yields the same `Pose`.
 
 3. Add a unit test in `Tests/PetCoreTests.swift`. The renderer needs no changes.
 
-Behaviors that need inputs beyond today's context (e.g. cursor position for a
-cursor-chase, or window/ground geometry for gravity/perch) should extend
-`BehaviorContext` with those fields and have `pet.swift` populate them — still
-without touching `draw()`'s pixel code.
+Behaviors that need inputs beyond today's context extend `BehaviorContext` with
+those fields and have `pet.swift` populate them — still without touching `draw()`'s
+pixel code. `WalkCycle` is the worked example: roam mode adds `walking` / `walkPhase`
+to the context, the renderer drives them from the pure `Roam` physics (gravity +
+desktop wander, in `PetCore.swift`), and only the leg lift is read back in `draw()`.

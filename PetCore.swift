@@ -250,6 +250,7 @@ struct Pose {
     var bob: CGFloat = 0        // whole-body hop (a genuine jump leaves the ground)
     var scaleY: CGFloat = 1     // whole-body breathing / landing squash
     var scaleX: CGFloat = 1     // whole-body horizontal stretch (the long-dog stretch antic)
+    var walk: Double = 0        // walk-cycle phase (seconds) driving the roam leg gait; 0 = standing still
     var headTilt: CGFloat = 0   // radians — tilt just the head (curious)
     var headBob: CGFloat = 0    // head vertical offset in cells (+ up / − nose-down sniff)
     var tremble: CGFloat = 0    // head jitter amplitude in cells (fear)
@@ -275,11 +276,13 @@ struct Pose {
     /// touching this signature or the renderer's `draw()`. Kept as the stable
     /// entry point so every existing call site (and unit test) is unchanged.
     static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false,
-                     antic: Antic? = nil, anticPhase: Double = 0) -> Pose {
+                     antic: Antic? = nil, anticPhase: Double = 0,
+                     walking: Bool = false, walkPhase: Double = 0) -> Pose {
         let ctx = BehaviorContext(mood: mood, phase: phase, message: message,
                                   reduceMotion: reduceMotion,
                                   motionScale: reduceMotion ? reducedMotionScale : 1,
-                                  antic: antic, anticPhase: anticPhase)
+                                  antic: antic, anticPhase: anticPhase,
+                                  walking: walking, walkPhase: walkPhase)
         return PetBehaviors.render(ctx)
     }
 }
@@ -424,6 +427,19 @@ struct BehaviorContext {
     let motionScale: CGFloat   // 1 normally, damped to ~15% under Reduce Motion
     let antic: Antic?          // idle flourish currently playing, if any
     let anticPhase: Double     // seconds since that antic began
+    let walking: Bool          // roam-mode: the pet is walking across the desktop
+    let walkPhase: Double      // roam-mode: walk-cycle clock (seconds) driving the gait
+
+    // Explicit init with defaults for the roam fields so existing call sites
+    // (Pose.make, tests) that predate roam mode compile unchanged.
+    init(mood: Mood, phase: Double, message: String, reduceMotion: Bool,
+         motionScale: CGFloat, antic: Antic?, anticPhase: Double,
+         walking: Bool = false, walkPhase: Double = 0) {
+        self.mood = mood; self.phase = phase; self.message = message
+        self.reduceMotion = reduceMotion; self.motionScale = motionScale
+        self.antic = antic; self.anticPhase = anticPhase
+        self.walking = walking; self.walkPhase = walkPhase
+    }
 }
 
 /// One frame contributor. Behaviors are side-effect-light: they mutate the
@@ -504,11 +520,31 @@ struct IdleAnticLayer: Behavior {
     }
 }
 
+/// Roam-mode locomotion overlay: while the pet is walking across the desktop it
+/// gets a gentle trotting bob, a lively tail and a happy panting tongue, and its
+/// `walk` phase is published so the renderer can animate the legs (per-leg lift
+/// in `draw()`). Runs last so it layers over the calm idle pose it walks out of;
+/// a no-op unless `ctx.walking`, so a still pet is byte-for-byte unchanged. The
+/// renderer only sets `walking` when roam is enabled and Reduce Motion is off,
+/// so this never fights that setting.
+struct WalkCycle: Behavior {
+    func apply(to p: inout Pose, _ ctx: BehaviorContext) {
+        guard ctx.walking else { return }
+        p.walk = ctx.walkPhase
+        // Trotting bounce — small, integer-friendly, on top of the idle breathing.
+        p.bob += CGFloat(abs(sin(ctx.walkPhase * 6))) * 2
+        // Happy on-the-move face: perky tail and a panting tongue.
+        p.feat.mouth = .pant
+        p.feat.wag = max(p.feat.wag, 6)
+        p.feat.tailDown = false
+    }
+}
+
 /// The active behavior pipeline and the composition entry point. New behaviors
 /// are added to `pipeline` — the renderer never changes.
 enum PetBehaviors {
     /// Ordered composition run every frame: expression first, then overlays.
-    static let pipeline: [Behavior] = [MoodExpression(), IdleAnticLayer()]
+    static let pipeline: [Behavior] = [MoodExpression(), IdleAnticLayer(), WalkCycle()]
 
     /// Compose `behaviors` (defaulting to `pipeline`) into a single frame.
     /// `motionScale` is seeded on the fresh `Pose` so every behavior sees the
@@ -519,6 +555,129 @@ enum PetBehaviors {
         p.motionScale = ctx.motionScale
         for b in behaviors { b.apply(to: &p, ctx) }
         return p
+    }
+}
+
+// MARK: - Roam-mode locomotion (optional; gravity + desktop wander)
+//
+// When the `roam` behavior is enabled, the pet stops being a static floater and
+// instead lives on the desktop floor (the top of the Dock / the screen edge): it
+// strolls left and right, obeys gravity so a pet lifted and dropped after a drag
+// falls back down and lands, and perches on the floor line. All of that is pure
+// physics + a small wander state machine here, kept AppKit-free so it is unit-
+// tested without a running app; the renderer (pet.swift) only supplies the frame
+// clock and the screen geometry, then applies the resulting window origin.
+//
+// Coordinates are AppKit screen points (y grows upward). The unit that moves is
+// the *window origin*; `floorY` is the origin-y at which the paws rest on the
+// floor, and `minX…maxX` is the origin-x travel range that keeps the whole
+// window on-screen. Roam is suppressed entirely under Reduce Motion (the
+// renderer simply doesn't call `step`), so that setting keeps the pet exactly as
+// static + draggable as it is with roam off.
+struct Roam {
+    // --- tunables (points, seconds) ---
+    static let gravity: CGFloat = 2600     // downward acceleration while airborne
+    static let maxFall: CGFloat = 2600     // terminal fall speed, so a big drop stays sane
+    static let walkSpeed: CGFloat = 42     // ground stroll speed, before the config `speed` multiplier
+    static let walkMin = 1.6, walkMax = 4.2   // seconds spent strolling before a pause
+    static let pauseMin = 1.4, pauseMax = 4.0 // seconds spent resting before the next stroll
+    static let landEps: CGFloat = 0.5      // within this of the floor counts as landed
+
+    enum Gait: Equatable { case walking, pausing }
+
+    var vy: CGFloat = 0        // vertical velocity (+ up); non-zero only while falling
+    var gait: Gait = .pausing  // wander phase; starts resting, then picks a direction to stroll
+    var dir: CGFloat = 1       // stroll direction: +1 = screen-right, -1 = screen-left
+    var timer: Double = 0      // seconds left in the current gait
+    var airborne = false       // off the floor last step — so a touchdown fires `landed` exactly once
+
+    /// The next-frame result the renderer applies: the new window origin plus the
+    /// flags it needs to pick the pose (walk cycle vs. falling) and a one-shot
+    /// `landed` for the landing squash.
+    struct Frame: Equatable {
+        var x: CGFloat
+        var y: CGFloat
+        var walking: Bool   // drive the leg walk cycle this frame
+        var falling: Bool   // airborne under gravity this frame
+        var dir: CGFloat    // facing / travel direction (+1 right, -1 left)
+        var landed: Bool    // just touched down this frame (trigger a squash)
+    }
+
+    /// Advance the physics one frame.
+    /// - Parameters:
+    ///   - x, y: the current window origin (may have just been moved by a drag).
+    ///   - dt: seconds since the last frame.
+    ///   - floorY: origin-y at which the paws rest on the floor.
+    ///   - minX, maxX: origin-x travel range keeping the window on-screen.
+    ///   - speed: the config animation-speed multiplier (scales the stroll pace).
+    ///   - wander: whether the pet may stroll now (idle, no antic/cursor-watch); when
+    ///     false it still obeys gravity but just stands once grounded.
+    ///   - dragging: the user is holding the pet — physics is frozen until release.
+    ///   - random: uniform source in [0, 1) for the wander decisions (injected so this stays testable).
+    mutating func step(x: CGFloat, y: CGFloat, dt: Double,
+                       floorY: CGFloat, minX: CGFloat, maxX: CGFloat,
+                       speed: CGFloat, wander: Bool, dragging: Bool,
+                       random: () -> Double) -> Frame {
+        let hi = max(minX, maxX)
+        func clampX(_ v: CGFloat) -> CGFloat { min(hi, max(minX, v)) }
+
+        // Held by the user: hang where dragged, ready to fall on release. Don't
+        // clamp x, so the drag can carry the pet freely; bounds reassert on release.
+        if dragging {
+            vy = 0; airborne = true; gait = .pausing; timer = 0
+            return Frame(x: x, y: y, walking: false, falling: false, dir: dir, landed: false)
+        }
+
+        // Airborne: gravity pulls the pet down until the paws reach the floor.
+        if y > floorY + Self.landEps {
+            vy = max(vy - Self.gravity * CGFloat(dt), -Self.maxFall)
+            let ny = y + vy * CGFloat(dt)
+            if ny > floorY {
+                airborne = true
+                return Frame(x: clampX(x), y: ny, walking: false, falling: true, dir: dir, landed: false)
+            }
+            // Touchdown this frame.
+            vy = 0
+            let landed = airborne
+            airborne = false
+            gait = .pausing
+            timer = Self.pauseMin + random() * (Self.pauseMax - Self.pauseMin)
+            return Frame(x: clampX(x), y: floorY, walking: false, falling: false, dir: dir, landed: landed)
+        }
+
+        // Grounded: settle exactly on the floor line.
+        vy = 0; airborne = false
+
+        // Not free to wander (a real mood, a playing antic, cursor-watching): just
+        // stand on the floor, kept within the horizontal bounds.
+        guard wander else {
+            gait = .pausing
+            return Frame(x: clampX(x), y: floorY, walking: false, falling: false, dir: dir, landed: false)
+        }
+
+        // Wander state machine: alternate short strolls and rests; each new stroll
+        // picks a fresh direction.
+        timer -= dt
+        if timer <= 0 {
+            if gait == .walking {
+                gait = .pausing
+                timer = Self.pauseMin + random() * (Self.pauseMax - Self.pauseMin)
+            } else {
+                gait = .walking
+                timer = Self.walkMin + random() * (Self.walkMax - Self.walkMin)
+                dir = random() < 0.5 ? -1 : 1
+            }
+        }
+
+        guard gait == .walking else {
+            return Frame(x: clampX(x), y: floorY, walking: false, falling: false, dir: dir, landed: false)
+        }
+
+        // Stroll, bouncing off the screen edges (turn around rather than walk off).
+        var nx = x + dir * Self.walkSpeed * speed * CGFloat(dt)
+        if nx <= minX { nx = minX; dir = 1 }
+        if nx >= hi   { nx = hi;   dir = -1 }
+        return Frame(x: nx, y: floorY, walking: true, falling: false, dir: dir, landed: false)
     }
 }
 
@@ -545,7 +704,7 @@ struct PetConfig: Equatable {
     var openOnDoubleClick: String = ""
 
     /// Behaviors the pet understands today. Unknown entries in the file are ignored.
-    static let knownBehaviors: Set<String> = ["lookAround", "bubbles"]
+    static let knownBehaviors: Set<String> = ["lookAround", "bubbles", "roam"]
 
     /// The coat colour scheme to render, resolved from `palette` (falls back to
     /// the default coat for an unknown name).
@@ -569,6 +728,9 @@ struct PetConfig: Equatable {
     var lookAroundInterval: ClosedRange<Double> { lookAroundMin...lookAroundMax }
     /// Glancing around is on unless the user turns it off.
     var lookAround: Bool { behaviors.contains("lookAround") }
+    /// Roaming (walk around + gravity + perch on the desktop floor). Opt-in: off
+    /// unless the user adds `"roam"` to `enabledBehaviors`.
+    var roam: Bool { behaviors.contains("roam") }
     /// Speech bubbles show only when enabled *and* not muted.
     var bubblesEnabled: Bool { !muted && behaviors.contains("bubbles") }
 

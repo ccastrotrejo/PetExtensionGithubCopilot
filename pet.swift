@@ -34,6 +34,21 @@ final class PetState {
     var nextAntic: Double = 0         // phase clock at which the next antic fires (0 = disarmed)
     var gaze: Gaze = .none            // cursor-watching state this tick (nil-object when not near)
 
+    // Roam mode (opt-in): the pet walks the desktop floor and obeys gravity. The
+    // pure physics lives in `Roam` (PetCore); these track its live position + the
+    // pose flags the renderer needs. `roamX/roamY` is the authoritative fractional
+    // window origin (the window itself is set to the rounded value each frame so
+    // the sprite stays crisp); `roamActive` is false whenever roam is off/hidden
+    // so the position reseeds from the real window when it turns back on.
+    var roam = Roam()
+    var roamActive = false            // roam is currently driving the window (else reseed from it)
+    var roamX: CGFloat = 0            // authoritative fractional window origin x
+    var roamY: CGFloat = 0            // authoritative fractional window origin y
+    var roamWalking = false           // walking this tick (drive the leg walk cycle + face travel)
+    var roamFalling = false           // airborne under gravity this tick
+    var walkPhase: Double = 0         // walk-cycle clock, advanced only while walking
+    var landPhase: Double = -1        // phase clock at the last touchdown (-1 = none); drives the landing squash
+
     init(statePath: String) {
         self.statePath = statePath
         self.sessionsDir = (statePath as NSString).deletingLastPathComponent + "/sessions"
@@ -236,8 +251,10 @@ final class PetView: NSView {
     var nextTickInterval: TimeInterval {
         guard isVisibleOnScreen else { return Cadence.hiddenInterval }
         // A playing idle antic is real motion, so it runs at the active cadence
-        // even though the mood itself (idle) is otherwise calm/throttled.
+        // even though the mood itself (idle) is otherwise calm/throttled. Roaming
+        // (walking or falling) is likewise active motion.
         let calm = Cadence.isCalm(state.mood) && state.antic == nil
+            && !state.roamWalking && !state.roamFalling
         return Cadence.interval(reduceMotion: reduceMotionEnabled, calm: calm)
     }
 
@@ -265,6 +282,18 @@ final class PetView: NSView {
         // the whole animation (breathing, wag, antics) runs faster or slower.
         if visible { state.phase += dt * state.config.speed }
 
+        // Roam mode (opt-in): drive the walk + gravity physics, which moves the
+        // window itself. Suppressed under Reduce Motion (OS or config) so that
+        // setting keeps the pet exactly as static + draggable as roam-off. When
+        // not roaming, clear the flags so the rest of the tick behaves as before.
+        if visible, state.config.roam, !reduceMotionEnabled {
+            stepRoam(dt: dt)
+        } else {
+            state.roamActive = false
+            state.roamWalking = false
+            state.roamFalling = false
+        }
+
         // Cursor gaze: while the pointer is near, the pet watches it — its eyes
         // track the cursor and its head turns via the three facings — instead of
         // glancing around on its own. It carries no motion budget of its own, so
@@ -273,7 +302,7 @@ final class PetView: NSView {
         // playing antic keeps priority). Recomputed every visible tick.
         state.gaze = .none
         if visible, state.config.lookAround, !reduceMotionEnabled,
-           state.mood == .idle, state.antic == nil {
+           state.mood == .idle, state.antic == nil, !state.roamWalking, !state.roamFalling {
             let g = cursorGaze()
             if g.active {
                 state.gaze = g
@@ -286,7 +315,8 @@ final class PetView: NSView {
         // Reduce Motion (OS or config) — a still/hidden/occluded pet keeps
         // facing you; it's the most conspicuous "non-essential" motion. Skipped
         // while actively watching the cursor, so gaze isn't fought by a glance.
-        if visible, state.config.lookAround, !reduceMotionEnabled, !state.gaze.active, now >= state.nextTurn {
+        if visible, state.config.lookAround, !reduceMotionEnabled, !state.gaze.active,
+           !state.roamWalking, !state.roamFalling, now >= state.nextTurn {
             if state.nextTurn != 0 {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
@@ -428,7 +458,7 @@ final class PetView: NSView {
     /// the pose the renderer draws.
     private func updateAntics() {
         let clock = state.phase
-        guard state.mood == .idle, !reduceMotionEnabled else {
+        guard state.mood == .idle, !reduceMotionEnabled, !state.roamWalking, !state.roamFalling else {
             state.antic = nil
             state.nextAntic = 0
             return
@@ -446,7 +476,68 @@ final class PetView: NSView {
         }
     }
 
-    /// The pet's gaze toward the current cursor position. Polls the global mouse
+    /// Drive one frame of roam-mode locomotion: advance the pure `Roam` physics
+    /// and move the *window* to match (walk along the floor, fall under gravity).
+    /// The window origin is set to the rounded position so the sprite stays crisp;
+    /// the fractional truth is kept in `state.roamX/roamY`. Only called while roam
+    /// is enabled, Reduce Motion is off, and the pet is on-screen.
+    private func stepRoam(dt: TimeInterval) {
+        guard let win = window else { return }
+        let origin = win.frame.origin
+        let w = win.frame.width
+
+        // Work on the screen the pet is currently over (its visible frame excludes
+        // the menu bar and Dock, so its bottom edge is the desktop floor / Dock top).
+        let center = CGPoint(x: origin.x + w / 2, y: origin.y + win.frame.height / 2)
+        let screen = NSScreen.screens.first { $0.frame.contains(center) } ?? win.screen ?? NSScreen.main
+        let vf = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+
+        // Resting origin-y so the contact shadow (paws) lands on the floor line —
+        // matches the shadow geometry in draw().
+        let ground = (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
+        let floorY = vf.minY - ground
+        let minX = vf.minX
+        let maxX = vf.maxX - w
+
+        // (Re)seed the fractional position from the real window whenever roam
+        // (re)activates or the user is dragging, so a drag hands off cleanly to
+        // the physics and re-enabling roam never teleports the pet.
+        if !state.roamActive || isDraggingWindow {
+            state.roamX = origin.x
+            state.roamY = origin.y
+            state.roamActive = true
+        }
+
+        // Wander (stroll) only when idle and not mid-antic; otherwise the pet just
+        // stands on the floor. Gravity always applies, so a dropped pet still falls.
+        let wander = state.mood == .idle && state.antic == nil
+
+        let f = state.roam.step(x: state.roamX, y: state.roamY, dt: dt,
+                                floorY: floorY, minX: minX, maxX: maxX,
+                                speed: CGFloat(state.config.speed),
+                                wander: wander, dragging: isDraggingWindow,
+                                random: { Double.random(in: 0..<1) })
+        state.roamX = f.x
+        state.roamY = f.y
+        state.roamWalking = f.walking
+        state.roamFalling = f.falling
+
+        // Face the way it walks; advance the walk-cycle clock only while walking.
+        if f.walking {
+            state.walkPhase += dt * state.config.speed
+            state.facing = f.dir > 0 ? .right : .left
+        }
+        if f.landed { state.landPhase = state.phase }
+
+        // Move the window (rounded to whole points for crisp pixels). Skip the
+        // set while the user is actively dragging — they own the window then.
+        if !isDraggingWindow {
+            let np = NSPoint(x: f.x.rounded(), y: f.y.rounded())
+            if np != origin { win.setFrameOrigin(np) }
+        }
+    }
+
+
     /// location (works regardless of key/focus, since this is an accessory app)
     /// and measures it against the pet's head center in screen coordinates. The
     /// pure `Gaze` model decides whether the cursor is near, which way to face,
@@ -470,9 +561,22 @@ final class PetView: NSView {
         let W = bounds.width
         let phase = state.phase
         let anticPhase = state.antic != nil ? max(0, phase - state.anticStart) : 0
-        let pose = Pose.make(for: state.mood, phase: phase, message: state.message,
+        var pose = Pose.make(for: state.mood, phase: phase, message: state.message,
                              reduceMotion: reduceMotionEnabled,
-                             antic: state.antic, anticPhase: anticPhase)
+                             antic: state.antic, anticPhase: anticPhase,
+                             walking: state.roamWalking, walkPhase: state.walkPhase)
+
+        // Roam landing squash: a quick squash-and-stretch right after a touchdown
+        // sells the gravity. Short-lived and roam-only (`landPhase` is set only
+        // when the physics reports a landing), so it never affects the static pet.
+        if state.landPhase >= 0 {
+            let u = (phase - state.landPhase) / 0.18
+            if u >= 0, u < 1 {
+                let k = 1 - u                 // 1 at contact, easing back to 0
+                pose.scaleY *= 1 - 0.16 * k
+                pose.scaleX *= 1 + 0.10 * k
+            }
+        }
 
         // Resolve the pupil offset for this frame from the cursor gaze. It's
         // expressed in world space (+x = screen-right), so mirror the horizontal
@@ -592,6 +696,14 @@ final class PetView: NSView {
         let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8 * pose.motionScale).rounded()) : 0
         let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1 * pose.motionScale).rounded())
 
+        // Walk cycle (roam mode): each leg lifts one crisp cell in a rolling gait
+        // while `pose.walk` advances. Standing (`walk == 0`) → all four planted, so
+        // the static/idle pet is byte-for-byte unchanged.
+        let legX = [-13, -9, 5, 9]
+        let legLift: [Int] = pose.walk > 0
+            ? [0.0, 0.5, 0.25, 0.75].map { sin(pose.walk * 9 + $0 * 2 * Double.pi) > 0.55 ? 1 : 0 }
+            : [0, 0, 0, 0]
+
         // ---- BODY: tail, legs, torso ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
@@ -601,7 +713,7 @@ final class PetView: NSView {
                 p(-16, 5, 2, 2, coat.dark); p(-17, 7, 2, 2, coat.dark)
                 p(-18 + wag, 9, 2, 2, coat.dark)         // curled tip
             }
-            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, coat.body) }   // stubby legs
+            for (i, lx) in legX.enumerated() { p(lx, legLift[i], 3, 3, coat.body) }   // stubby legs (lift while walking)
             p(-15, 3, 25, 5, coat.body)                  // long low sausage
             p(-14, 8, 23, 1, coat.body); p(-14, 2, 23, 1, coat.body)
         }
@@ -611,7 +723,7 @@ final class PetView: NSView {
         box(-13, 8, 21, 1, coat.bodyHi)         // warm topline highlight
         box(-14, 2, 23, 2, coat.tan)            // tan belly (bottom rows)
         box(-14, 2, 23, 1, coat.tanShade)       // shadow at the very bottom edge
-        for lx in [-13, -9, 5, 9] { box(lx, 0, 3, 1, coat.tan) }   // paws
+        for (i, lx) in legX.enumerated() { box(lx, legLift[i], 3, 1, coat.tan) }   // paws (track the lifted legs)
 
         // ---- HEAD: head, snout, ear, face — animated around the neck pivot ----
         let jitter = pose.tremble > 0 ? CGFloat(Int((sin(phase * 34) * pose.tremble).rounded())) : 0
