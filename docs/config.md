@@ -38,6 +38,8 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `name` | string | `""` | Give the pet a name. Shown subtly: on hover (tooltip) and in its greeting when a session starts ("hi, I'm …!"). Trimmed to 24 characters. |
 | `breed` | string | `"dachshund"` | **Reserved** for the personalization work. Parsed and stored today, but only the dachshund is drawn. |
 | `openOnDoubleClick` | string | `""` | What **double-clicking the pet** opens. Empty (default) launches/focuses the **GitHub Copilot host app** that spawned the pet. Set a bundle id (`"com.github.githubapp"`), an app name (`"Copilot"`) or full path (`"/Applications/Copilot.app"`) to target something else, or `"none"`/`"off"` to disable double-click entirely. Single-click-drag still moves the pet regardless. |
+| `celebrateMilestones` | boolean | `false` | Opt-in wellness nudge. When `true`, the pet throws a brief celebration (a bigger, wigglier party than the routine "done!") when it detects a **milestone**: a test command passing, or a pull request being opened/merged (`gh pr create` / `gh pr merge`, or the PR tool). At most once per turn, and never on failure. Read by the controller (`extension.mjs`), not the renderer. |
+| `breakReminderMinutes` | number | `0` | Opt-in break reminder, in minutes (`0` = off). After this many minutes of **continuous work** the pet gives one gentle nudge — a yawn and a "take a break? 🐾" — at the next turn boundary. Positive values are clamped to `1`–`600`. A lull of over 5 minutes counts as a real break and resets the streak, so you get at most one nudge per work run. Never steals focus (the pet is an accessory window) and never fires mid-work. |
 
 ## Examples
 
@@ -78,11 +80,22 @@ A personalized companion — a named cream dachshund that moves calmly:
 }
 ```
 
+A wellness-minded pet — celebrates green tests and PRs, and nudges you to rest
+after 50 minutes of continuous work:
+
+```json
+{
+  "celebrateMilestones": true,
+  "breakReminderMinutes": 50
+}
+```
+
 ## Where it's read
 
 Both halves of the extension use the file:
 
-- **`extension.mjs`** passes the config path to the pet and warns (via `session.log`) if the JSON is invalid.
+- **`extension.mjs`** passes the config path to the pet, warns (via `session.log`) if the JSON is
+  invalid, and reads `celebrateMilestones` / `breakReminderMinutes` to drive the wellness nudges.
 - **`pet.swift`** reads and hot-reloads it, mapping keys to size, look-around timing, behaviors, mute, and Reduce Motion.
 
 The parsing and defaults live in the pure, unit-tested `PetConfig` type in `PetCore.swift`
