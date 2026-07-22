@@ -23,6 +23,9 @@ final class PetState {
     var lastPoll: TimeInterval = 0
     var facing: Facing = .front       // greet by looking at you
     var nextTurn: TimeInterval = 0    // when to next glance around
+    var config = PetConfig()          // user settings (hot-reloaded from config.json)
+    var configPath: String = ""
+    var configMTime: Double = -1      // last-seen config.json mtime; -1 = absent
 
     init(statePath: String) { self.statePath = statePath }
 }
@@ -32,7 +35,7 @@ final class PetState {
 final class PetView: NSView {
     let state: PetState
     let groundY: CGFloat = 40
-    let petSize: CGFloat = 62
+    var petSize: CGFloat { state.config.size }   // user-configurable (config.json)
     var lastFrameTime: TimeInterval = Date().timeIntervalSince1970
 
     init(frame: NSRect, state: PetState) {
@@ -63,18 +66,20 @@ final class PetView: NSView {
         if now - state.lastPoll > 0.18 {
             state.lastPoll = now
             loadState()
+            loadConfig()
         }
 
         let hbAgeMs = now * 1000.0 - state.heartbeat
         if hbAgeMs > 12_000 { NSApp.terminate(nil); return }
 
         // Occasionally turn to look right / left / at you (skip the first frame
-        // so the initial facing sticks).
+        // so the initial facing sticks). Honors the lookAround behavior and
+        // Reduce Motion — a still pet keeps facing you.
         if now >= state.nextTurn {
-            if state.nextTurn != 0 {
+            if state.nextTurn != 0 && state.config.lookAround && !state.config.reduceMotion {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
-            state.nextTurn = now + Double.random(in: 4...9)
+            state.nextTurn = now + Double.random(in: state.config.lookAroundInterval)
         }
 
         advanceMood(now: now)
@@ -107,6 +112,43 @@ final class PetView: NSView {
         }
     }
 
+    // Poll config.json for changes (hot-reload). Cheap: only re-parses when the
+    // file's mtime changes; an absent or unreadable file falls back to defaults.
+    private func loadConfig() {
+        let path = state.configPath
+        guard !path.isEmpty else { return }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        if mtime == state.configMTime { return }   // nothing changed
+        state.configMTime = mtime
+
+        let newConfig: PetConfig
+        if mtime >= 0,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            newConfig = PetConfig.parse(obj)
+        } else {
+            newConfig = PetConfig()   // absent or broken → defaults
+        }
+
+        let oldSize = state.config.size
+        state.config = newConfig
+        if !newConfig.lookAround { state.facing = .front }   // stop mid-glance
+        if newConfig.size != oldSize { resizeWindow() }
+        needsDisplay = true
+    }
+
+    // Grow/shrink the window to fit the configured pet size, keeping the
+    // bottom-left origin so the pet doesn't jump when resized.
+    private func resizeWindow() {
+        guard let win = self.window else { return }
+        let newSize = windowSize(for: petSize)
+        var frame = win.frame
+        frame.size = newSize
+        win.setFrame(frame, display: true)
+        self.frame = CGRect(origin: .zero, size: newSize)
+    }
+
     private func advanceMood(now: TimeInterval) {
         guard let n = state.mood.autoNext else { return }
         if now - state.moodChangeTime > n.after {
@@ -123,7 +165,9 @@ final class PetView: NSView {
 
         let W = bounds.width
         let phase = state.phase
-        let pose = Pose.make(for: state.mood, phase: phase, message: state.message)
+        let animate = !state.config.reduceMotion
+        let pose = Pose.make(for: state.mood, phase: phase, message: state.message,
+                             reduceMotion: state.config.reduceMotion)
 
         let cx = bounds.midX
         let cy = groundY + petSize * 0.5 + pose.bob
@@ -151,9 +195,9 @@ final class PetView: NSView {
         ctx.translateBy(x: cx.rounded(), y: cy.rounded())
         ctx.scaleBy(x: state.facing == .left ? -1 : 1, y: pose.scaleY)
         if state.facing == .front {
-            drawDachshundFront(size: petSize, pose: pose, phase: phase)
+            drawDachshundFront(size: petSize, pose: pose, phase: phase, animate: animate)
         } else {
-            drawDachshundPixel(size: petSize, pose: pose, phase: phase)
+            drawDachshundPixel(size: petSize, pose: pose, phase: phase, animate: animate)
         }
         ctx.restoreGState()
 
@@ -162,25 +206,25 @@ final class PetView: NSView {
         if let acc = pose.accessory {
             ctx.saveGState()
             ctx.setShouldAntialias(false)
-            let accBob = sin(phase * 4) * 3
+            let accBob = animate ? sin(phase * 4) * 3 : 0
             let up = cy + petSize * (acc == .think ? 0.50 : 0.36) + accBob
             switch state.facing {
             case .right:
                 let ax = (cx + petSize * (acc == .think ? 0.58 : 0.38)).rounded()
-                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase)
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, animate: animate)
             case .left:
                 let ax = (cx - petSize * (acc == .think ? 0.58 : 0.38)).rounded()
                 ctx.translateBy(x: ax, y: 0); ctx.scaleBy(x: -1, y: 1); ctx.translateBy(x: -ax, y: 0)
-                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase)
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, animate: animate)
             case .front:
                 let ax = (cx + petSize * 0.44).rounded()
-                drawAccessory(acc, at: CGPoint(x: ax, y: (cy + petSize * 0.55 + accBob).rounded()), phase: phase)
+                drawAccessory(acc, at: CGPoint(x: ax, y: (cy + petSize * 0.55 + accBob).rounded()), phase: phase, animate: animate)
             }
             ctx.restoreGState()
         }
 
-        // Speech bubble
-        if let text = pose.bubble, !text.isEmpty {
+        // Speech bubble (suppressed when muted or the bubbles behavior is off)
+        if state.config.bubblesEnabled, let text = pose.bubble, !text.isEmpty {
             drawBubble(text, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
         }
     }
@@ -204,7 +248,7 @@ final class PetView: NSView {
     /// The body is drawn first, then the head as a separate group that can tilt,
     /// sniff (nose-down) or tremble — so moods animate real body parts rather
     /// than sliding the whole picture around.
-    private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double) {
+    private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double, animate: Bool) {
         let feat = pose.feat
         let cell = max(2, (s / 26).rounded())
         let footY = (-0.44 * s).rounded()
@@ -216,9 +260,10 @@ final class PetView: NSView {
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
 
-        // Animated offsets: tail wag + ear flap (quicker when excited).
+        // Animated offsets: tail wag + ear flap (quicker when excited). Frozen
+        // when Reduce Motion is on.
         let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8).rounded()) : 0
-        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded())
+        let ear = animate ? Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded()) : 0
 
         // ---- BODY: tail, legs, torso ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
@@ -263,14 +308,14 @@ final class PetView: NSView {
         box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
         box(20, 5, 3, 3, PetView.cNose)             // nose at the snout tip
         if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
-        drawEye(feat.eyes, box: box, phase: phase)
-        drawMouth(feat.mouth, box: box, phase: phase)
+        drawEye(feat.eyes, box: box, phase: phase, animate: animate)
+        drawMouth(feat.mouth, box: box, phase: phase, animate: animate)
         ctx.restoreGState()
     }
 
     /// Face-on view of the dachshund: round head, both floppy ears, two eyes,
     /// front paws. Symmetric around x = 0. Head group animates (tilt/sniff/tremble).
-    private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double) {
+    private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double, animate: Bool) {
         let feat = pose.feat
         let cell = max(2, (s / 26).rounded())
         let footY = (-0.44 * s).rounded()
@@ -281,7 +326,7 @@ final class PetView: NSView {
             NSBezierPath(rect: NSRect(x: CGFloat(cx) * cell, y: footY + CGFloat(cy) * cell,
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
-        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded())
+        let ear = animate ? Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded()) : 0
 
         // ---- BODY: two front legs + chest ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
@@ -318,7 +363,7 @@ final class PetView: NSView {
         if feat.eyes == .happy { box(-6, 10, 2, 2, PetView.cCheek); box(4, 10, 2, 2, PetView.cCheek) }
 
         // Two eyes
-        let blink = feat.eyes == .open && fmod(phase, 3.4) < 0.12
+        let blink = animate && feat.eyes == .open && fmod(phase, 3.4) < 0.12
         func frontEye(_ ex: Int) {
             switch feat.eyes {
             case .open, .worried:
@@ -344,15 +389,15 @@ final class PetView: NSView {
         case .pant, .open:
             box(-1, 7, 2, 2, PetView.cNose)
             if feat.mouth == .pant {
-                let drop = Int((sin(phase * 8) * 0.5 + 0.5).rounded())
+                let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
                 box(-1, 6 - drop, 2, 1 + drop, PetView.cTongue)
             }
         }
         ctx.restoreGState()
     }
 
-    private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
-        let blink = e == .open && fmod(phase, 3.4) < 0.12
+    private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double, animate: Bool) {
+        let blink = animate && e == .open && fmod(phase, 3.4) < 0.12
         switch e {
         case .open, .worried:
             if blink { box(12, 10, 4, 1, PetView.cEye); return }
@@ -370,7 +415,7 @@ final class PetView: NSView {
         }
     }
 
-    private func drawMouth(_ m: MouthState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
+    private func drawMouth(_ m: MouthState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double, animate: Bool) {
         switch m {
         case .neutral:
             box(18, 4, 2, 1, PetView.cNose)
@@ -379,7 +424,7 @@ final class PetView: NSView {
         case .pant, .open:
             box(18, 3, 3, 2, PetView.cNose)
             if m == .pant {
-                let drop = Int((sin(phase * 8) * 0.5 + 0.5).rounded())
+                let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
                 box(18, 2 - drop, 2, 1 + drop, PetView.cTongue)
             }
         }
@@ -396,7 +441,7 @@ final class PetView: NSView {
     private static let cZ         = NSColor(red: 0.22, green: 0.46, blue: 0.86, alpha: 1)
     private static let cPaw       = NSColor(red: 0.90, green: 0.70, blue: 0.48, alpha: 1)
 
-    private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double) {
+    private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double, animate: Bool) {
         let u: CGFloat = 3                      // same pixel unit as the dog body
         func b(_ gx: CGFloat, _ gy: CGFloat, _ w: CGFloat, _ h: CGFloat, _ color: NSColor) {
             color.setFill()
@@ -407,7 +452,7 @@ final class PetView: NSView {
         case .gear:
             b(-1.5, -1.5, 3, 3, PetView.cGear)
             b(-0.5, -0.5, 1, 1, PetView.cGearDark)          // hub
-            if Int(phase * 4) % 2 == 0 {                    // teeth N/S/E/W
+            if !animate || Int(phase * 4) % 2 == 0 {        // teeth N/S/E/W
                 b(-0.5, 1.5, 1, 1, PetView.cGear); b(-0.5, -2.5, 1, 1, PetView.cGear)
                 b(1.5, -0.5, 1, 1, PetView.cGear); b(-2.5, -0.5, 1, 1, PetView.cGear)
             } else {                                        // teeth on corners → spins
@@ -415,13 +460,13 @@ final class PetView: NSView {
                 b(1.5, -2.5, 1, 1, PetView.cGear); b(-2.5, -2.5, 1, 1, PetView.cGear)
             }
         case .sparkle:
-            let big: CGFloat = sin(phase * 6) > 0 ? 2 : 1.4
+            let big: CGFloat = (animate && sin(phase * 6) > 0) ? 2 : 1.4
             b(-0.5, -big, 1, big * 2, PetView.cSpark)
             b(-big, -0.5, big * 2, 1, PetView.cSpark)
             b(1.8, 1.3, 0.8, 1.6, PetView.cSpark)           // small companion
             b(1.4, 1.7, 1.6, 0.8, PetView.cSpark)
         case .sweat:
-            let d = CGFloat(sin(phase * 5)) * 0.3
+            let d = animate ? CGFloat(sin(phase * 5)) * 0.3 : 0
             b(-1, -1 + d, 2, 2, PetView.cSweat)             // droplet
             b(-0.5, 1 + d, 1, 1, PetView.cSweat)            // tip
             b(1.4, 0.2 - d, 1, 1, PetView.cSweat)           // second bead
@@ -436,7 +481,7 @@ final class PetView: NSView {
             b(-2.3, -1.8, 1.1, 1.1, e); b(-2.2, -1.7, 0.9, 0.9, PetView.cCloud)  // trailing puffs
             b(-3.1, -3.0, 0.9, 0.9, e); b(-3.0, -2.9, 0.7, 0.7, PetView.cCloud)
         case .sleep:
-            let r = CGFloat(sin(phase * 2)) * 0.4
+            let r = animate ? CGFloat(sin(phase * 2)) * 0.4 : 0
             b(-1.6, 1.4 + r, 3, 0.8, PetView.cZ)            // big Z
             b(0.2, 0.4 + r, 0.9, 0.9, PetView.cZ)
             b(-0.7, -0.4 + r, 0.9, 0.9, PetView.cZ)
@@ -445,7 +490,7 @@ final class PetView: NSView {
             b(2.0, 1.9 + r, 0.6, 0.6, PetView.cZ)
             b(1.7, 1.4 + r, 1.6, 0.6, PetView.cZ)
         case .wave:
-            let dx = CGFloat(sin(phase * 7)) * 0.4          // waving paw
+            let dx = animate ? CGFloat(sin(phase * 7)) * 0.4 : 0   // waving paw
             b(-1.5 + dx, -1.5, 3, 3, PetView.cPaw)          // palm
             b(-1.5 + dx, 1.4, 0.8, 0.9, PetView.cPaw)       // toes
             b(-0.4 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
@@ -506,6 +551,13 @@ func writePos(_ o: CGPoint, _ path: String) {
     try? "\(o.x),\(o.y)".write(toFile: path, atomically: true, encoding: .utf8)
 }
 
+/// Window dimensions sized to fit the pet (config `size`), with a floor that
+/// keeps speech bubbles readable for small pets.
+func windowSize(for petSize: CGFloat) -> CGSize {
+    CGSize(width: max(200, (petSize * 3.3).rounded()),
+           height: max(170, (petSize * 2.8).rounded()))
+}
+
 // MARK: - App bootstrap
 
 @main
@@ -517,6 +569,8 @@ enum PetApp {
         }
         let statePath = CommandLine.arguments[1]
         let posPath = (statePath as NSString).deletingLastPathComponent + "/pet.pos"
+        // Optional user settings file (argv[2]); the pet also hot-reloads it.
+        let configPath = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2] : ""
 
         // Single-instance: hold an exclusive lock for the process lifetime. A second
         // pet (from a restart race or a concurrent session) fails to acquire it and
@@ -531,8 +585,17 @@ enum PetApp {
         app.setActivationPolicy(.accessory)
 
         let state = PetState(statePath: statePath)
+        state.configPath = configPath
+        // Read the config once up front so the initial window is the right size.
+        if !configPath.isEmpty,
+           let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            state.config = PetConfig.parse(obj)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: configPath)
+            state.configMTime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        }
 
-        let winSize = CGSize(width: 200, height: 170)
+        let winSize = windowSize(for: state.config.size)
         var origin = CGPoint(x: 200, y: 200)
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame

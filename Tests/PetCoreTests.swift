@@ -79,6 +79,52 @@ enum PetCoreTests {
         }
         check(reachedFront && reachedLeft, "from right, both left and front are reachable")
 
+        // MARK: PetConfig.parse — defaults, merging, clamping, validation
+        let defaults = PetConfig.parse(nil)
+        check(defaults.size == 62 && defaults.lookAroundInterval == 4...9, "config: defaults when absent")
+        check(defaults.behaviors == ["lookAround", "bubbles"] && !defaults.muted && !defaults.reduceMotion,
+              "config: default behaviors, unmuted, motion on")
+        check(defaults.lookAround && defaults.bubblesEnabled, "config: lookAround + bubbles on by default")
+        check(PetConfig.parse([:]) == defaults, "config: empty object == defaults")
+
+        // Partial config keeps defaults for the missing keys.
+        let partial = PetConfig.parse(["size": 90.0])
+        check(partial.size == 90 && partial.lookAroundInterval == 4...9, "config: partial keeps other defaults")
+
+        // size clamps to a sane window range.
+        check(PetConfig.parse(["size": 5.0]).size == 32, "config: size clamps up to 32")
+        check(PetConfig.parse(["size": 999.0]).size == 160, "config: size clamps down to 160")
+
+        // lookAroundInterval accepts a fixed number or a [min, max] pair.
+        check(PetConfig.parse(["lookAroundInterval": 6.0]).lookAroundInterval == 6...6, "config: fixed interval")
+        check(PetConfig.parse(["lookAroundInterval": [3.0, 8.0]]).lookAroundInterval == 3...8, "config: [min,max] interval")
+        check(PetConfig.parse(["lookAroundInterval": [8.0, 3.0]]).lookAroundInterval == 3...8, "config: interval order-normalized")
+
+        // muted suppresses bubbles even when the behavior is enabled.
+        check(!PetConfig.parse(["muted": true]).bubblesEnabled, "config: muted suppresses bubbles")
+        check(!PetConfig.parse(["enabledBehaviors": ["lookAround"]]).bubblesEnabled, "config: bubbles off when not listed")
+        check(!PetConfig.parse(["enabledBehaviors": ["bubbles"]]).lookAround, "config: lookAround off when not listed")
+        check(PetConfig.parse(["enabledBehaviors": ["bubbles", "bogus"]]).behaviors == ["bubbles"],
+              "config: unknown behaviors ignored")
+
+        check(PetConfig.parse(["reduceMotion": true]).reduceMotion, "config: reduceMotion parsed")
+        check(PetConfig.parse(["breed": "corgi"]).breed == "corgi", "config: breed parsed (reserved)")
+        check(PetConfig.parse(["palette": "gray"]).palette == "gray", "config: palette parsed (reserved)")
+
+        // Wrong types fall back to defaults rather than crashing.
+        check(PetConfig.parse(["size": "big"]).size == 62, "config: bad type falls back to default")
+
+        // MARK: reduceMotion — flattens every motion field, keeps expression
+        let calmHappy = Pose.make(for: .happy, phase: 0.25, message: "", reduceMotion: true)
+        check(calmHappy.bob == 0 && calmHappy.scaleY == 1 && calmHappy.feat.wag == 0,
+              "reduceMotion: happy holds still (no bob/scale/wag)")
+        check(calmHappy.accessory == .sparkle && calmHappy.feat.eyes == .happy,
+              "reduceMotion: keeps the happy expression")
+        let calmThinking = Pose.make(for: .thinking, phase: 1.0, message: "", reduceMotion: true)
+        check(calmThinking.headTilt == 0 && calmThinking.tremble == 0, "reduceMotion: no head tilt/tremble")
+        check(calmThinking.accessory == .think && calmThinking.bubble == "thinking…",
+              "reduceMotion: keeps thinking accessory + bubble")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

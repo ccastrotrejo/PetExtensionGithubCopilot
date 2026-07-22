@@ -1,5 +1,8 @@
 # Compiled Swift binary (rebuilt on first load)
 .bin/
 
+# User settings — copy config.example.json to config.json and edit
+config.json
+
 # macOS
 .DS_Store

@@ -53,19 +53,43 @@ CI runs all three on every push (`.github/workflows/ci.yml`).
 The extension registers a `pet_control` tool. Ask the agent things like *"hide the pet"*,
 *"make the pet sleep"*, *"restart the pet"*. Actions: `mood`, `say`, `show`, `hide`, `quit`, `restart`.
 
+## Configuration
+
+The pet works with zero setup. To customize it, copy the template and edit any keys you like — all
+optional, hot-reloaded while the pet is running:
+
+```sh
+cp ~/.copilot/extensions/copilot-pet/config.example.json \
+   ~/.copilot/extensions/copilot-pet/config.json
+```
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `size` | `62` | Pet size (points), `32`–`160`. |
+| `lookAroundInterval` | `[4, 9]` | Seconds between glances (number or `[min, max]`). |
+| `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing / speech bubbles. |
+| `muted` | `false` | Suppress all speech bubbles. |
+| `reduceMotion` | `false` | Hold still (accessibility) while keeping the expression. |
+| `breed` / `palette` | `dachshund` / `chestnut` | Reserved for personalization (parsed, not yet rendered). |
+
+Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
+reference: [`docs/config.md`](docs/config.md).
+
 ## Files
 
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures` (no AppKit). Unit-tested. |
-| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`. |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext`. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `PetConfig` (no AppKit). Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; hot-reloads `config.json`. |
+| `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `PetConfig.parse`. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
 ## Documentation
 
+- [`docs/config.md`](docs/config.md) — the `config.json` settings file: keys, defaults, hot-reload.
 - [`docs/copilot-extensions.md`](docs/copilot-extensions.md) — how Copilot extensions work (architecture, discovery, lifecycle).
 - [`docs/sdk-reference.md`](docs/sdk-reference.md) — the `@github/copilot-sdk` API: `joinSession`, hooks, session object, events.
 - [`docs/architecture.md`](docs/architecture.md) — this pet's design, IPC protocol, and decisions.

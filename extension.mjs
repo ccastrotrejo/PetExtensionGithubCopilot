@@ -31,6 +31,8 @@ const stateDir = path.join(os.tmpdir(), "copilot-pet");
 const statePath = path.join(stateDir, "state.json");
 const pidPath = path.join(stateDir, "pet.pid");
 const logPath = path.join(stateDir, "pet.log");
+// Optional user settings, read by both this extension and the pet. See docs/config.md.
+const configPath = path.join(extDir, "config.json");
 
 fs.mkdirSync(stateDir, { recursive: true });
 fs.mkdirSync(binDir, { recursive: true });
@@ -45,6 +47,18 @@ function readExistingSeq() {
     return typeof s.seq === "number" ? s.seq : 0;
   } catch {
     return 0;
+  }
+}
+
+// Returns a warning string if config.json exists but isn't valid JSON, else null.
+// The pet reads the file itself; this only surfaces obvious mistakes to the user.
+function configWarning() {
+  if (!fs.existsSync(configPath)) return null;
+  try {
+    JSON.parse(fs.readFileSync(configPath, "utf8"));
+    return null;
+  } catch (e) {
+    return `config.json is not valid JSON (${e.message}); the pet is using defaults.`;
   }
 }
 
@@ -126,7 +140,7 @@ function ensureRunning() {
   if (pidAlive(pid)) return { reused: true, pid };
 
   const out = fs.openSync(logPath, "a");
-  const child = spawn(petBin, [statePath], {
+  const child = spawn(petBin, [statePath, configPath], {
     detached: true,
     stdio: ["ignore", out, out],
   });
@@ -268,4 +282,6 @@ if (bootError) {
   await session.log(`🐾 Copilot pet couldn't start: ${bootError}`, { level: "warning" });
 } else {
   await session.log("🐾 Copilot pet is here — it reacts to what I'm doing.", { ephemeral: true });
+  const warn = configWarning();
+  if (warn) await session.log(`🐾 ${warn}`, { level: "warning" });
 }
