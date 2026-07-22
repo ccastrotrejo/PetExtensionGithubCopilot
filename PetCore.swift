@@ -116,59 +116,20 @@ struct Pose {
     var motionScale: CGFloat = 1
     static let reducedMotionScale: CGFloat = 0.15
 
+    /// Build the render frame for `mood`. Thin adapter over the behavior
+    /// pipeline (`PetBehaviors`): it packages the inputs into a `BehaviorContext`
+    /// and composes the ordered behaviors into a single `Pose`. The mood's
+    /// expression and the idle-antic overlay are themselves behaviors, so a new
+    /// behavior (cursor-chase, gravity, perch…) slots into the pipeline without
+    /// touching this signature or the renderer's `draw()`. Kept as the stable
+    /// entry point so every existing call site (and unit test) is unchanged.
     static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false,
                      antic: Antic? = nil, anticPhase: Double = 0) -> Pose {
-        var p = Pose()
-        let scale: CGFloat = reduceMotion ? reducedMotionScale : 1
-        p.motionScale = scale
-        switch mood {
-        case .idle:
-            // Calm breathing; the tail sways and the ear ticks (handled in draw).
-            p.scaleY = 1 + sin(phase * 2.2) * 0.02 * scale
-            p.feat = DogFeatures(eyes: .open, mouth: .smile, wag: 2)
-        case .sleeping:
-            // Slow deep breaths; the head rises and falls with each breath.
-            p.scaleY = 1 + sin(phase * 1.8) * 0.035 * scale
-            p.headBob = sin(phase * 1.8) * 0.4 * scale
-            p.feat = DogFeatures(eyes: .closed, mouth: .neutral, wag: 0)
-            p.accessory = .sleep
-        case .greet:
-            // Eager little hops with a fast wagging tail.
-            p.bob = abs(sin(phase * 7)) * 8 * scale
-            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 12)
-            p.accessory = .wave; p.bubble = "hi!"
-        case .thinking:
-            // Curious head tilt side to side — the body stays put.
-            p.headTilt = sin(phase * 1.5) * 0.22 * scale
-            p.feat = DogFeatures(eyes: .open, mouth: .neutral, wag: 1)
-            p.accessory = .think; p.bubble = message.isEmpty ? "thinking…" : message
-        case .working:
-            // Nose-down sniffing/digging while it works; panting tongue.
-            p.headBob = -abs(sin(phase * 5)) * 1.4 * scale
-            p.feat = DogFeatures(eyes: .open, mouth: .pant, wag: 5)
-            p.accessory = .gear; p.bubble = message.isEmpty ? "working…" : message
-        case .happy:
-            // Springy bounce with a squash-and-stretch on the landing.
-            let hop = abs(sin(phase * 6))
-            p.bob = hop * 16 * scale
-            p.scaleY = 1 + ((1 - hop) * 0.06 - hop * 0.03) * scale
-            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
-            p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
-        case .worried:
-            // Cowering: head lowered and trembling, tail tucked.
-            p.headBob = -0.7 * scale
-            p.tremble = 0.5 * scale
-            p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
-            p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
-        }
-        // Idle antics: occasional autonomous flourishes (stretch, yawn, sniff…)
-        // layered onto the calm idle pose. Only in idle and never under Reduce
-        // Motion, so a real mood's expression always takes precedence — an antic
-        // never fights a mood.
-        if mood == .idle, let antic = antic, !reduceMotion {
-            antic.apply(&p, anticPhase: anticPhase)
-        }
-        return p
+        let ctx = BehaviorContext(mood: mood, phase: phase, message: message,
+                                  reduceMotion: reduceMotion,
+                                  motionScale: reduceMotion ? reducedMotionScale : 1,
+                                  antic: antic, anticPhase: anticPhase)
+        return PetBehaviors.render(ctx)
     }
 }
 
@@ -286,6 +247,118 @@ enum IdleAntics {
         var acc = 0.0
         for a in opts { acc += a.weight; if pick < acc { return a } }
         return opts.last!
+    }
+}
+
+// MARK: - Behavior composition (pluggable frame contributors)
+//
+// A pet's on-screen frame is built by *composing* small behaviors rather than
+// growing one switch. Each `Behavior` reads the immutable per-frame inputs
+// (`BehaviorContext`) and contributes to a shared, mutable `Pose`. The renderer
+// only ever consumes the final `Pose`, so a new behavior (cursor-chase,
+// gravity, perch, extra flourishes…) is added by slotting it into
+// `PetBehaviors.pipeline` — never by editing `draw()`.
+//
+// Today the pipeline is two behaviors: `MoodExpression` (the deep module that
+// decodes a mood into features + motion) and `IdleAnticLayer` (the autonomous
+// idle flourishes). Both are pure and unit-tested; adding a third leaves them
+// untouched. This is the pet's "YAGE-style" composition core.
+
+/// Immutable inputs a behavior may read while contributing to a frame.
+struct BehaviorContext {
+    let mood: Mood
+    let phase: Double          // animation clock, in seconds
+    let message: String        // agent-supplied bubble text (may be empty)
+    let reduceMotion: Bool     // OS or config Reduce Motion in effect
+    let motionScale: CGFloat   // 1 normally, damped to ~15% under Reduce Motion
+    let antic: Antic?          // idle flourish currently playing, if any
+    let anticPhase: Double     // seconds since that antic began
+}
+
+/// One frame contributor. Behaviors are side-effect-light: they mutate the
+/// passed-in `Pose` and read only the context — no IO, no global state — so the
+/// whole pipeline stays deterministic and testable without a running app.
+protocol Behavior {
+    func apply(to pose: inout Pose, _ ctx: BehaviorContext)
+}
+
+/// The deep expression module: a mood decodes to everything needed to render
+/// (breathing, hops, head motion, eyes/mouth/tail, accessory, bubble). Ambient
+/// wobble is damped by `ctx.motionScale`; discrete expression is not.
+struct MoodExpression: Behavior {
+    func apply(to p: inout Pose, _ ctx: BehaviorContext) {
+        let scale = ctx.motionScale
+        let phase = ctx.phase
+        let message = ctx.message
+        switch ctx.mood {
+        case .idle:
+            // Calm breathing; the tail sways and the ear ticks (handled in draw).
+            p.scaleY = 1 + sin(phase * 2.2) * 0.02 * scale
+            p.feat = DogFeatures(eyes: .open, mouth: .smile, wag: 2)
+        case .sleeping:
+            // Slow deep breaths; the head rises and falls with each breath.
+            p.scaleY = 1 + sin(phase * 1.8) * 0.035 * scale
+            p.headBob = sin(phase * 1.8) * 0.4 * scale
+            p.feat = DogFeatures(eyes: .closed, mouth: .neutral, wag: 0)
+            p.accessory = .sleep
+        case .greet:
+            // Eager little hops with a fast wagging tail.
+            p.bob = abs(sin(phase * 7)) * 8 * scale
+            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 12)
+            p.accessory = .wave; p.bubble = "hi!"
+        case .thinking:
+            // Curious head tilt side to side — the body stays put.
+            p.headTilt = sin(phase * 1.5) * 0.22 * scale
+            p.feat = DogFeatures(eyes: .open, mouth: .neutral, wag: 1)
+            p.accessory = .think; p.bubble = message.isEmpty ? "thinking…" : message
+        case .working:
+            // Nose-down sniffing/digging while it works; panting tongue.
+            p.headBob = -abs(sin(phase * 5)) * 1.4 * scale
+            p.feat = DogFeatures(eyes: .open, mouth: .pant, wag: 5)
+            p.accessory = .gear; p.bubble = message.isEmpty ? "working…" : message
+        case .happy:
+            // Springy bounce with a squash-and-stretch on the landing.
+            let hop = abs(sin(phase * 6))
+            p.bob = hop * 16 * scale
+            p.scaleY = 1 + ((1 - hop) * 0.06 - hop * 0.03) * scale
+            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
+            p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
+        case .worried:
+            // Cowering: head lowered and trembling, tail tucked.
+            p.headBob = -0.7 * scale
+            p.tremble = 0.5 * scale
+            p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
+            p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
+        }
+    }
+}
+
+/// Overlays the idle antic (stretch, yawn, sniff…) onto the calm idle pose.
+/// Only in `idle`, and never under Reduce Motion, so a real mood's expression
+/// always takes precedence — an antic never fights a mood, and eases in from
+/// rest. This runs after `MoodExpression`, layering on top of its pose.
+struct IdleAnticLayer: Behavior {
+    func apply(to p: inout Pose, _ ctx: BehaviorContext) {
+        guard ctx.mood == .idle, let antic = ctx.antic, !ctx.reduceMotion else { return }
+        antic.apply(&p, anticPhase: ctx.anticPhase)
+    }
+}
+
+/// The active behavior pipeline and the composition entry point. New behaviors
+/// are added to `pipeline` — the renderer never changes.
+enum PetBehaviors {
+    /// Ordered composition run every frame: expression first, then overlays.
+    static let pipeline: [Behavior] = [MoodExpression(), IdleAnticLayer()]
+
+    /// Compose `behaviors` (defaulting to `pipeline`) into a single frame.
+    /// `motionScale` is seeded on the fresh `Pose` so every behavior sees the
+    /// same Reduce-Motion damping factor, then each behavior contributes in
+    /// order. Pure: given the same context it always returns the same `Pose`.
+    static func render(_ ctx: BehaviorContext, through behaviors: [Behavior] = pipeline) -> Pose {
+        var p = Pose()
+        p.motionScale = ctx.motionScale
+        for b in behaviors { b.apply(to: &p, ctx) }
+        return p
     }
 }
 
