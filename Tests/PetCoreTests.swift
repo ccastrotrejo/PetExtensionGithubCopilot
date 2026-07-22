@@ -57,6 +57,14 @@ enum PetCoreTests {
         check(Pose.make(for: .working, phase: 0, message: "npm test").bubble == "npm test",
               "working: passes message through")
 
+        // MARK: Part-based animation — genuine behaviors, not whole-image motion
+        check(Pose.make(for: .thinking, phase: 1.0, message: "").bob == 0, "thinking: no whole-body hop")
+        check(abs(Pose.make(for: .thinking, phase: 1.0, message: "").headTilt) > 0.01, "thinking: head tilts")
+        check(Pose.make(for: .working, phase: 0.3, message: "").headBob < 0, "working: nose dips to sniff")
+        check(Pose.make(for: .worried, phase: 0.2, message: "").tremble > 0, "worried: head trembles")
+        check(Pose.make(for: .worried, phase: 0, message: "").headBob < 0, "worried: head lowered (cower)")
+        check(Pose.make(for: .happy, phase: 0.25, message: "").bob > 0, "happy: bounces off the ground")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

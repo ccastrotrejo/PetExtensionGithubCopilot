@@ -131,10 +131,9 @@ final class PetView: NSView {
         // device pixels so no cell lands on a half-pixel (which would blur it).
         ctx.saveGState()
         ctx.setShouldAntialias(false)
-        ctx.translateBy(x: (cx + pose.shakeX).rounded(), y: cy.rounded())
-        if pose.rot != 0 { ctx.rotate(by: pose.rot) }
+        ctx.translateBy(x: cx.rounded(), y: cy.rounded())
         ctx.scaleBy(x: 1, y: pose.scaleY)
-        drawDachshundPixel(size: petSize, feat: pose.feat, phase: phase)
+        drawDachshundPixel(size: petSize, pose: pose, phase: phase)
         ctx.restoreGState()
 
         // Accessory (pixel-art icon near head) — same pixel unit as the dog.
@@ -172,12 +171,14 @@ final class PetView: NSView {
     private static let cSaddle   = NSColor(red: 0.33, green: 0.17, blue: 0.09, alpha: 1) // dark back marking
 
     /// Draws a chibi pixel-art dachshund centred at the origin, facing right.
-    /// Long low body, tiny legs, long snout, floppy ears — the sausage-dog look.
-    /// Whole-cell coordinates; y counts up from the feet. A dark outline pass
-    /// (silhouette offset in 4 directions) keeps it readable on any wallpaper.
-    private func drawDachshundPixel(size s: CGFloat, feat: DogFeatures, phase: Double) {
+    /// The body is drawn first, then the head as a separate group that can tilt,
+    /// sniff (nose-down) or tremble — so moods animate real body parts rather
+    /// than sliding the whole picture around.
+    private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double) {
+        let feat = pose.feat
         let cell = max(2, (s / 26).rounded())
         let footY = (-0.44 * s).rounded()
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
         func box(_ cx: Int, _ cy: Int, _ w: Int, _ h: Int, _ color: NSColor) {
             color.setFill()
@@ -185,59 +186,56 @@ final class PetView: NSView {
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
 
-        // Animated offsets: tail wags, ear flaps (faster when excited).
+        // Animated offsets: tail wag + ear flap (quicker when excited).
         let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8).rounded()) : 0
         let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded())
 
-        // Solid silhouette parts — reused for the dark outline pass and the fill.
-        func solids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
-            func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) {
-                box(x + dx, y + dy, w, h, flat ?? real)
-            }
-            // Tail — long & tapering, held up off the rump (wags side to side)
+        // ---- BODY: tail, legs, torso ----
+        func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
+            func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
             if feat.tailDown {
                 p(-16, 2, 2, 3, PetView.cDark); p(-17, 1, 2, 2, PetView.cDark)
             } else {
-                p(-16, 5, 2, 2, PetView.cDark)
-                p(-17, 7, 2, 2, PetView.cDark)
-                p(-18 + wag, 9, 2, 2, PetView.cDark)     // curled tip
+                p(-16, 5, 2, 2, PetView.cDark); p(-17, 7, 2, 2, PetView.cDark)
+                p(-18 + wag, 9, 2, 2, PetView.cDark)         // curled tip
             }
-            // Legs — very short & stubby (the dachshund signature)
-            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, PetView.cBody) }
-            // Body — long, low sausage
-            p(-15, 3, 25, 5, PetView.cBody)
-            p(-14, 8, 23, 1, PetView.cBody)              // rounded topline
-            p(-14, 2, 23, 1, PetView.cBody)              // rounded underline
-            // Head — big round chibi at the right end
-            p(7, 5, 11, 9, PetView.cBody)
-            p(8, 14, 9, 1, PetView.cBody); p(8, 4, 9, 1, PetView.cBody)
-            // Long snout tapering out to the right
-            p(16, 5, 6, 4, PetView.cBody)
-            p(21, 6, 2, 2, PetView.cBody)
-            // Ear — long & floppy, hangs down the cheek (sways)
-            p(7 + ear, 3, 4, 10, PetView.cDark); p(8, 2, 3, 1, PetView.cDark)
+            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, PetView.cBody) }   // stubby legs
+            p(-15, 3, 25, 5, PetView.cBody)                  // long low sausage
+            p(-14, 8, 23, 1, PetView.cBody); p(-14, 2, 23, 1, PetView.cBody)
         }
-
-        // 1) dark outline
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { solids(ox, oy, PetView.cOutline) }
-        // 2) flat fill
-        solids(0, 0, nil)
-
-        // 3) two-tone markings + shading (fill only, top-left light)
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, PetView.cOutline) }
+        bodySolids(0, 0, nil)
         box(-14, 6, 21, 3, PetView.cSaddle)         // dark saddle wraps the back
         box(-13, 8, 21, 1, PetView.cBodyHi)         // warm topline highlight
-        box(8, 13, 8, 1, PetView.cBodyHi)           // head highlight
-        // Tan underside: belly along the bottom + chest under the neck.
-        box(-14, 2, 23, 2, PetView.cTan)            // belly (bottom rows, long)
-        box(6, 4, 5, 3, PetView.cTan)               // chest under the head
-        box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
+        box(-14, 2, 23, 2, PetView.cTan)            // tan belly (bottom rows)
         box(-14, 2, 23, 1, PetView.cTanShade)       // shadow at the very bottom edge
         for lx in [-13, -9, 5, 9] { box(lx, 0, 3, 1, PetView.cTan) }   // paws
+
+        // ---- HEAD: head, snout, ear, face — animated around the neck pivot ----
+        let jitter = pose.tremble > 0 ? CGFloat(Int((sin(phase * 34) * pose.tremble).rounded())) : 0
+        let px = CGFloat(9) * cell, py = footY + CGFloat(6) * cell   // neck pivot
+        ctx.saveGState()
+        ctx.translateBy(x: px + jitter * cell, y: py + pose.headBob * cell)
+        if pose.headTilt != 0 { ctx.rotate(by: pose.headTilt) }
+        ctx.translateBy(x: -px, y: -py)
+
+        func headSolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
+            func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
+            p(7, 5, 11, 9, PetView.cBody)                    // big round head
+            p(8, 14, 9, 1, PetView.cBody); p(8, 4, 9, 1, PetView.cBody)
+            p(16, 5, 6, 4, PetView.cBody); p(21, 6, 2, 2, PetView.cBody)   // long snout
+            p(7 + ear, 3, 4, 10, PetView.cDark); p(8, 2, 3, 1, PetView.cDark)   // floppy ear
+        }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, PetView.cOutline) }
+        headSolids(0, 0, nil)
+        box(5, 4, 12, 2, PetView.cTan)              // tan chest/neck (also hides the seam)
+        box(8, 13, 8, 1, PetView.cBodyHi)           // head highlight
+        box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
         box(20, 5, 3, 3, PetView.cNose)             // nose at the snout tip
         if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
-
         drawEye(feat.eyes, box: box, phase: phase)
         drawMouth(feat.mouth, box: box, phase: phase)
+        ctx.restoreGState()
     }
 
     private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
