@@ -66,34 +66,76 @@ final class PetView: NSView {
         return petBBox().contains(point) ? self : nil
     }
 
+    // MARK: Cadence — Reduce Motion + visibility
+
+    /// Live read of the OS accessibility setting, checked every tick so the
+    /// pet reacts immediately if the user flips it while running.
+    private var osReduceMotionEnabled: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Effective Reduce Motion: honors either the live OS accessibility setting
+    /// or the user's `config.json` override — whichever asks for stillness wins.
+    private var reduceMotionEnabled: Bool {
+        osReduceMotionEnabled || state.config.reduceMotion
+    }
+
+    /// False while the window is hidden (`orderOut`) or occluded (covered by
+    /// other windows / on another Space) — the two cases where redrawing and
+    /// advancing the animation would burn CPU for pixels nobody can see.
+    private var isVisibleOnScreen: Bool {
+        guard let win = window else { return true }
+        return win.isVisible && win.occlusionState.contains(.visible)
+    }
+
+    /// Seconds until the next tick should run. Computed fresh each call so it
+    /// always reflects the latest mood, Reduce Motion setting, and window
+    /// visibility — including changes `loadState()` just made this tick (e.g.
+    /// a "hidden" mood ordering the window out).
+    var nextTickInterval: TimeInterval {
+        guard isVisibleOnScreen else { return Cadence.hiddenInterval }
+        // A playing idle antic is real motion, so it runs at the active cadence
+        // even though the mood itself (idle) is otherwise calm/throttled.
+        let calm = Cadence.isCalm(state.mood) && state.antic == nil
+        return Cadence.interval(reduceMotion: reduceMotionEnabled, calm: calm)
+    }
+
     func tick() {
         let now = Date().timeIntervalSince1970
         let dt = min(0.1, now - lastFrameTime)
         lastFrameTime = now
-        state.phase += dt
 
         if now - state.lastPoll > 0.18 {
             state.lastPoll = now
-            loadState()
+            loadState()   // may hide/show the window (e.g. "hidden" mood)
             loadConfig()
         }
 
         let hbAgeMs = now * 1000.0 - state.heartbeat
         if hbAgeMs > 12_000 { NSApp.terminate(nil); return }
 
+        // Re-check visibility after loadState() so a window it just hid/showed
+        // is never animated or redrawn using stale pre-load visibility.
+        let visible = isVisibleOnScreen
+
+        // Only advance the animation clock while something can actually be
+        // seen; a hidden/occluded pet still needs to poll state + heartbeat,
+        // but there is nothing to animate or redraw.
+        if visible { state.phase += dt }
+
         // Occasionally turn to look right / left / at you (skip the first frame
         // so the initial facing sticks). Honors the lookAround behavior and
-        // Reduce Motion — a still pet keeps facing you.
-        if now >= state.nextTurn {
-            if state.nextTurn != 0 && state.config.lookAround && !state.config.reduceMotion {
+        // Reduce Motion (OS or config) — a still/hidden/occluded pet keeps
+        // facing you; it's the most conspicuous "non-essential" motion.
+        if visible, state.config.lookAround, !reduceMotionEnabled, now >= state.nextTurn {
+            if state.nextTurn != 0 {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
             state.nextTurn = now + Double.random(in: state.config.lookAroundInterval)
         }
 
         advanceMood(now: now)
-        updateAntics()
-        needsDisplay = true
+        if visible { updateAntics(); needsDisplay = true }
     }
 
     private func loadState() {
@@ -211,12 +253,13 @@ final class PetView: NSView {
     }
 
     /// Schedule and expire idle antics. Antics enliven the calm `idle` mood only:
-    /// any real mood — or Reduce Motion — cancels the current antic and disarms
-    /// the scheduler, which re-arms on the next return to idle. Timing runs on the
-    /// animation `phase` clock so it matches the pose the renderer draws.
+    /// any real mood — or Reduce Motion (OS setting or config override) — cancels
+    /// the current antic and disarms the scheduler, which re-arms on the next
+    /// return to idle. Timing runs on the animation `phase` clock so it matches
+    /// the pose the renderer draws.
     private func updateAntics() {
         let clock = state.phase
-        guard state.mood == .idle, !state.config.reduceMotion else {
+        guard state.mood == .idle, !reduceMotionEnabled else {
             state.antic = nil
             state.nextAntic = 0
             return
@@ -242,10 +285,9 @@ final class PetView: NSView {
 
         let W = bounds.width
         let phase = state.phase
-        let animate = !state.config.reduceMotion
         let anticPhase = state.antic != nil ? max(0, phase - state.anticStart) : 0
         let pose = Pose.make(for: state.mood, phase: phase, message: state.message,
-                             reduceMotion: state.config.reduceMotion,
+                             reduceMotion: reduceMotionEnabled,
                              antic: state.antic, anticPhase: anticPhase)
 
         let cx = bounds.midX
@@ -274,9 +316,9 @@ final class PetView: NSView {
         ctx.translateBy(x: cx.rounded(), y: cy.rounded())
         ctx.scaleBy(x: (state.facing == .left ? -1 : 1) * pose.scaleX, y: pose.scaleY)
         if state.facing == .front {
-            drawDachshundFront(size: petSize, pose: pose, phase: phase, animate: animate)
+            drawDachshundFront(size: petSize, pose: pose, phase: phase)
         } else {
-            drawDachshundPixel(size: petSize, pose: pose, phase: phase, animate: animate)
+            drawDachshundPixel(size: petSize, pose: pose, phase: phase)
         }
         ctx.restoreGState()
 
@@ -285,19 +327,19 @@ final class PetView: NSView {
         if let acc = pose.accessory {
             ctx.saveGState()
             ctx.setShouldAntialias(false)
-            let accBob = animate ? sin(phase * 4) * 3 : 0
+            let accBob = sin(phase * 4) * 3 * pose.motionScale
             let up = cy + petSize * (acc == .think ? 0.50 : 0.36) + accBob
             switch state.facing {
             case .right:
                 let ax = (cx + petSize * (acc == .think ? 0.58 : 0.38)).rounded()
-                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, animate: animate)
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, motionScale: pose.motionScale)
             case .left:
                 let ax = (cx - petSize * (acc == .think ? 0.58 : 0.38)).rounded()
                 ctx.translateBy(x: ax, y: 0); ctx.scaleBy(x: -1, y: 1); ctx.translateBy(x: -ax, y: 0)
-                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, animate: animate)
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase, motionScale: pose.motionScale)
             case .front:
                 let ax = (cx + petSize * 0.44).rounded()
-                drawAccessory(acc, at: CGPoint(x: ax, y: (cy + petSize * 0.55 + accBob).rounded()), phase: phase, animate: animate)
+                drawAccessory(acc, at: CGPoint(x: ax, y: (cy + petSize * 0.55 + accBob).rounded()), phase: phase, motionScale: pose.motionScale)
             }
             ctx.restoreGState()
         }
@@ -327,7 +369,7 @@ final class PetView: NSView {
     /// The body is drawn first, then the head as a separate group that can tilt,
     /// sniff (nose-down) or tremble — so moods animate real body parts rather
     /// than sliding the whole picture around.
-    private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double, animate: Bool) {
+    private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double) {
         let feat = pose.feat
         let cell = max(2, (s / 26).rounded())
         let footY = (-0.44 * s).rounded()
@@ -339,10 +381,10 @@ final class PetView: NSView {
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
 
-        // Animated offsets: tail wag + ear flap (quicker when excited). Frozen
-        // when Reduce Motion is on.
-        let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8).rounded()) : 0
-        let ear = animate ? Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded()) : 0
+        // Animated offsets: tail wag + ear flap (quicker when excited), damped
+        // by pose.motionScale under Reduce Motion.
+        let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8 * pose.motionScale).rounded()) : 0
+        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1 * pose.motionScale).rounded())
 
         // ---- BODY: tail, legs, torso ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
@@ -387,14 +429,14 @@ final class PetView: NSView {
         box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
         box(20, 5, 3, 3, PetView.cNose)             // nose at the snout tip
         if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
-        drawEye(feat.eyes, box: box, phase: phase, animate: animate)
-        drawMouth(feat.mouth, box: box, phase: phase, animate: animate)
+        drawEye(feat.eyes, box: box, phase: phase)
+        drawMouth(feat.mouth, box: box, phase: phase, motionScale: pose.motionScale)
         ctx.restoreGState()
     }
 
     /// Face-on view of the dachshund: round head, both floppy ears, two eyes,
     /// front paws. Symmetric around x = 0. Head group animates (tilt/sniff/tremble).
-    private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double, animate: Bool) {
+    private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double) {
         let feat = pose.feat
         let cell = max(2, (s / 26).rounded())
         let footY = (-0.44 * s).rounded()
@@ -405,7 +447,7 @@ final class PetView: NSView {
             NSBezierPath(rect: NSRect(x: CGFloat(cx) * cell, y: footY + CGFloat(cy) * cell,
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
-        let ear = animate ? Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded()) : 0
+        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1 * pose.motionScale).rounded())
 
         // ---- BODY: two front legs + chest ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
@@ -442,7 +484,7 @@ final class PetView: NSView {
         if feat.eyes == .happy { box(-6, 10, 2, 2, PetView.cCheek); box(4, 10, 2, 2, PetView.cCheek) }
 
         // Two eyes
-        let blink = animate && feat.eyes == .open && fmod(phase, 3.4) < 0.12
+        let blink = feat.eyes == .open && fmod(phase, 3.4) < 0.12
         func frontEye(_ ex: Int) {
             switch feat.eyes {
             case .open, .worried:
@@ -468,7 +510,9 @@ final class PetView: NSView {
         case .pant, .open:
             box(-1, 7, 2, 2, PetView.cNose)
             if feat.mouth == .pant {
-                let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
+                // Under Reduce Motion, freeze the tongue on a stable frame instead of
+                // toggling 0/1 at full cadence (motionScale only damps amplitude, not rate).
+                let drop = pose.motionScale < 1 ? 0 : Int(((sin(phase * 8) * 0.5) + 0.5).rounded())
                 box(-1, 6 - drop, 2, 1 + drop, PetView.cTongue)
             }
         case .yawn:
@@ -478,8 +522,8 @@ final class PetView: NSView {
         ctx.restoreGState()
     }
 
-    private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double, animate: Bool) {
-        let blink = animate && e == .open && fmod(phase, 3.4) < 0.12
+    private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
+        let blink = e == .open && fmod(phase, 3.4) < 0.12
         switch e {
         case .open, .worried:
             if blink { box(12, 10, 4, 1, PetView.cEye); return }
@@ -497,7 +541,7 @@ final class PetView: NSView {
         }
     }
 
-    private func drawMouth(_ m: MouthState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double, animate: Bool) {
+    private func drawMouth(_ m: MouthState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double, motionScale: CGFloat) {
         switch m {
         case .neutral:
             box(18, 4, 2, 1, PetView.cNose)
@@ -506,7 +550,9 @@ final class PetView: NSView {
         case .pant, .open:
             box(18, 3, 3, 2, PetView.cNose)
             if m == .pant {
-                let drop = animate ? Int((sin(phase * 8) * 0.5 + 0.5).rounded()) : 1
+                // Under Reduce Motion, freeze the tongue on a stable frame instead of
+                // toggling 0/1 at full cadence (motionScale only damps amplitude, not rate).
+                let drop = motionScale < 1 ? 0 : Int(((sin(phase * 8) * 0.5) + 0.5).rounded())
                 box(18, 2 - drop, 2, 1 + drop, PetView.cTongue)
             }
         case .yawn:
@@ -526,7 +572,7 @@ final class PetView: NSView {
     private static let cZ         = NSColor(red: 0.22, green: 0.46, blue: 0.86, alpha: 1)
     private static let cPaw       = NSColor(red: 0.90, green: 0.70, blue: 0.48, alpha: 1)
 
-    private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double, animate: Bool) {
+    private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double, motionScale: CGFloat) {
         let u: CGFloat = 3                      // same pixel unit as the dog body
         func b(_ gx: CGFloat, _ gy: CGFloat, _ w: CGFloat, _ h: CGFloat, _ color: NSColor) {
             color.setFill()
@@ -537,7 +583,10 @@ final class PetView: NSView {
         case .gear:
             b(-1.5, -1.5, 3, 3, PetView.cGear)
             b(-0.5, -0.5, 1, 1, PetView.cGearDark)          // hub
-            if !animate || Int(phase * 4) % 2 == 0 {        // teeth N/S/E/W
+            // Teeth alternate N/S/E/W ↔ corners to suggest spinning; frozen on
+            // the N/S/E/W frame under Reduce Motion so the gear stays readable
+            // without flickering.
+            if motionScale < 1 || Int(phase * 4) % 2 == 0 {
                 b(-0.5, 1.5, 1, 1, PetView.cGear); b(-0.5, -2.5, 1, 1, PetView.cGear)
                 b(1.5, -0.5, 1, 1, PetView.cGear); b(-2.5, -0.5, 1, 1, PetView.cGear)
             } else {                                        // teeth on corners → spins
@@ -545,13 +594,15 @@ final class PetView: NSView {
                 b(1.5, -2.5, 1, 1, PetView.cGear); b(-2.5, -2.5, 1, 1, PetView.cGear)
             }
         case .sparkle:
-            let big: CGFloat = (animate && sin(phase * 6) > 0) ? 2 : 1.4
+            // Pulses between two sizes normally; frozen at a mid-size under
+            // Reduce Motion instead of continuing to flicker.
+            let big: CGFloat = motionScale < 1 ? 1.7 : (sin(phase * 6) > 0 ? 2 : 1.4)
             b(-0.5, -big, 1, big * 2, PetView.cSpark)
             b(-big, -0.5, big * 2, 1, PetView.cSpark)
             b(1.8, 1.3, 0.8, 1.6, PetView.cSpark)           // small companion
             b(1.4, 1.7, 1.6, 0.8, PetView.cSpark)
         case .sweat:
-            let d = animate ? CGFloat(sin(phase * 5)) * 0.3 : 0
+            let d = CGFloat(sin(phase * 5)) * 0.3 * motionScale
             b(-1, -1 + d, 2, 2, PetView.cSweat)             // droplet
             b(-0.5, 1 + d, 1, 1, PetView.cSweat)            // tip
             b(1.4, 0.2 - d, 1, 1, PetView.cSweat)           // second bead
@@ -566,7 +617,7 @@ final class PetView: NSView {
             b(-2.3, -1.8, 1.1, 1.1, e); b(-2.2, -1.7, 0.9, 0.9, PetView.cCloud)  // trailing puffs
             b(-3.1, -3.0, 0.9, 0.9, e); b(-3.0, -2.9, 0.7, 0.7, PetView.cCloud)
         case .sleep:
-            let r = animate ? CGFloat(sin(phase * 2)) * 0.4 : 0
+            let r = CGFloat(sin(phase * 2)) * 0.4 * motionScale
             b(-1.6, 1.4 + r, 3, 0.8, PetView.cZ)            // big Z
             b(0.2, 0.4 + r, 0.9, 0.9, PetView.cZ)
             b(-0.7, -0.4 + r, 0.9, 0.9, PetView.cZ)
@@ -575,7 +626,7 @@ final class PetView: NSView {
             b(2.0, 1.9 + r, 0.6, 0.6, PetView.cZ)
             b(1.7, 1.4 + r, 1.6, 0.6, PetView.cZ)
         case .wave:
-            let dx = animate ? CGFloat(sin(phase * 7)) * 0.4 : 0   // waving paw
+            let dx = CGFloat(sin(phase * 7)) * 0.4 * motionScale   // waving paw
             b(-1.5 + dx, -1.5, 3, 3, PetView.cPaw)          // palm
             b(-1.5 + dx, 1.4, 0.8, 0.9, PetView.cPaw)       // toes
             b(-0.4 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
@@ -716,8 +767,22 @@ enum PetApp {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
         }
 
-        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { _ in view.tick() }
-        RunLoop.main.add(timer, forMode: .common)
+        // Animation cadence is dynamic — Reduce Motion, calm moods, and window
+        // visibility/occlusion all throttle it (see PetView.nextTickInterval) —
+        // so each tick reschedules its own one-shot timer instead of relying on
+        // a single fixed 30 FPS repeating timer. Because tick() runs loadState()
+        // before this returns, the next interval always reflects any visibility
+        // change (e.g. a "hidden" mood ordering the window out) from this tick.
+        func scheduleNextTick() {
+            let t = Timer(timeInterval: view.nextTickInterval, repeats: false) { _ in
+                MainActor.assumeIsolated {
+                    view.tick()
+                    scheduleNextTick()
+                }
+            }
+            RunLoop.main.add(t, forMode: .common)
+        }
+        scheduleNextTick()
 
         app.run()
     }
