@@ -32,6 +32,7 @@ final class PetState {
     var lastAntic: Antic? = nil       // last antic played, so we don't repeat it back-to-back
     var anticStart: Double = 0        // phase clock when the current antic began
     var nextAntic: Double = 0         // phase clock at which the next antic fires (0 = disarmed)
+    var gaze: Gaze = .none            // cursor-watching state this tick (nil-object when not near)
 
     init(statePath: String) {
         self.statePath = statePath
@@ -46,6 +47,18 @@ final class PetView: NSView {
     let groundY: CGFloat = 40
     var petSize: CGFloat { state.config.size }   // user-configurable (config.json)
     var lastFrameTime: TimeInterval = Date().timeIntervalSince1970
+
+    // Pupil offset (in cells) for the eyes this frame, resolved from `state.gaze`
+    // for the current facing; (0,0) when the pet isn't watching the cursor.
+    private var eyeLook: (x: Int, y: Int) = (0, 0)
+
+    // Click-vs-drag tracking for the current mouse press. A press stays a
+    // "click" (→ pet the dog) until the pointer travels past the drag threshold,
+    // at which point it becomes a drag (→ reposition the window). See Interaction.
+    private var pressAnchor: NSPoint = .zero   // cursor at mouseDown (screen coords)
+    private var windowAnchor: NSPoint = .zero  // window origin at mouseDown
+    private var pressTravel: CGFloat = 0       // greatest pointer travel seen this press
+    private var isDraggingWindow = false
 
     init(frame: NSRect, state: PetState) {
         self.state = state
@@ -64,6 +77,54 @@ final class PetView: NSView {
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
         return petBBox().contains(point) ? self : nil
+    }
+
+    // MARK: Interaction — drag to reposition, click to pet
+    //
+    // The window is *not* `isMovableByWindowBackground`; we handle the press
+    // ourselves so a click and a drag can be told apart (Interaction). A press
+    // that never travels past the drag threshold is a pet (the `loved`
+    // reaction); once it travels further it becomes a window drag instead, so
+    // repositioning the pet never accidentally pets it.
+
+    // Let the very first click land on the pet even when the app is in the
+    // background (it's an accessory app that never becomes key on its own).
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        pressAnchor = NSEvent.mouseLocation
+        windowAnchor = window?.frame.origin ?? .zero
+        pressTravel = 0
+        isDraggingWindow = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        let m = NSEvent.mouseLocation
+        let dx = m.x - pressAnchor.x, dy = m.y - pressAnchor.y
+        pressTravel = max(pressTravel, (dx * dx + dy * dy).squareRoot())
+        if !isDraggingWindow, !Interaction.isClick(maxDisplacement: pressTravel) {
+            isDraggingWindow = true
+        }
+        if isDraggingWindow {
+            window?.setFrameOrigin(NSPoint(x: windowAnchor.x + dx, y: windowAnchor.y + dy))
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if Interaction.isClick(maxDisplacement: pressTravel) { petReaction() }
+    }
+
+    /// Play the local "petting" reaction: a brief delighted wriggle facing you.
+    /// It auto-returns to idle (Mood.autoNext) and then re-syncs to the live
+    /// session's mood (see advanceMood), so it never leaves the wire out of sync.
+    private func petReaction() {
+        state.mood = .loved
+        state.message = ""
+        state.moodChangeTime = Date().timeIntervalSince1970
+        state.facing = .front            // turn to look at you when petted
+        state.gaze = .none
+        state.antic = nil; state.nextAntic = 0
+        needsDisplay = true
     }
 
     // MARK: Cadence — Reduce Motion + visibility
@@ -123,11 +184,28 @@ final class PetView: NSView {
         // but there is nothing to animate or redraw.
         if visible { state.phase += dt }
 
+        // Cursor gaze: while the pointer is near, the pet watches it — its eyes
+        // track the cursor and its head turns via the three facings — instead of
+        // glancing around on its own. It carries no motion budget of its own, so
+        // it's gated behind the same `lookAround` behavior toggle and suppressed
+        // under Reduce Motion, and only runs in calm idle (a real mood or a
+        // playing antic keeps priority). Recomputed every visible tick.
+        state.gaze = .none
+        if visible, state.config.lookAround, !reduceMotionEnabled,
+           state.mood == .idle, state.antic == nil {
+            let g = cursorGaze()
+            if g.active {
+                state.gaze = g
+                state.facing = g.facing
+            }
+        }
+
         // Occasionally turn to look right / left / at you (skip the first frame
         // so the initial facing sticks). Honors the lookAround behavior and
         // Reduce Motion (OS or config) — a still/hidden/occluded pet keeps
-        // facing you; it's the most conspicuous "non-essential" motion.
-        if visible, state.config.lookAround, !reduceMotionEnabled, now >= state.nextTurn {
+        // facing you; it's the most conspicuous "non-essential" motion. Skipped
+        // while actively watching the cursor, so gaze isn't fought by a glance.
+        if visible, state.config.lookAround, !reduceMotionEnabled, !state.gaze.active, now >= state.nextTurn {
             if state.nextTurn != 0 {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
@@ -247,8 +325,13 @@ final class PetView: NSView {
     private func advanceMood(now: TimeInterval) {
         guard let n = state.mood.autoNext else { return }
         if now - state.moodChangeTime > n.after {
+            let was = state.mood
             state.mood = n.to
             state.moodChangeTime = now
+            // A local `loved` reaction overrode the wire; on the way back to
+            // idle, clear lastKey so loadState re-applies whatever the live
+            // session is actually doing (e.g. resume "working").
+            if was == .loved { state.lastKey = "" }
         }
     }
 
@@ -277,6 +360,21 @@ final class PetView: NSView {
         }
     }
 
+    /// The pet's gaze toward the current cursor position. Polls the global mouse
+    /// location (works regardless of key/focus, since this is an accessory app)
+    /// and measures it against the pet's head center in screen coordinates. The
+    /// pure `Gaze` model decides whether the cursor is near, which way to face,
+    /// and how far to shift the pupils.
+    private func cursorGaze() -> Gaze {
+        guard let win = window else { return .none }
+        let m = NSEvent.mouseLocation                       // global screen coords
+        // Head center in screen coords: the pet is drawn bottom-centered, with
+        // the head sitting a little above the body center.
+        let headX = win.frame.origin.x + bounds.midX
+        let headY = win.frame.origin.y + groundY + petSize * 0.5 + petSize * 0.28
+        return Gaze.toward(dx: m.x - headX, dy: m.y - headY, size: petSize)
+    }
+
     // MARK: Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -289,6 +387,16 @@ final class PetView: NSView {
         let pose = Pose.make(for: state.mood, phase: phase, message: state.message,
                              reduceMotion: reduceMotionEnabled,
                              antic: state.antic, anticPhase: anticPhase)
+
+        // Resolve the pupil offset for this frame from the cursor gaze. It's
+        // expressed in world space (+x = screen-right), so mirror the horizontal
+        // component when the side sprite is drawn flipped for a left facing.
+        eyeLook = (x: 0, y: 0)
+        if state.gaze.active {
+            let px = Int(state.gaze.pupil.dx.rounded())
+            let py = Int(state.gaze.pupil.dy.rounded())
+            eyeLook = (x: state.facing == .left ? -px : px, y: py)
+        }
 
         let cx = bounds.midX
         let cy = groundY + petSize * 0.5 + pose.bob
@@ -485,13 +593,16 @@ final class PetView: NSView {
 
         // Two eyes
         let blink = feat.eyes == .open && fmod(phase, 3.4) < 0.12
+        // Both eyes shift together toward the cursor (0 when not watching). Front
+        // is drawn un-mirrored, so the world-space offset applies directly.
+        let lx = eyeLook.x, ly = eyeLook.y
         func frontEye(_ ex: Int) {
             switch feat.eyes {
             case .open, .worried:
-                if blink { box(ex, 12, 3, 1, PetView.cEye); return }
-                box(ex, 11, 3, 3, PetView.cOutline)
-                box(ex, 11, 2, 2, PetView.cEye)
-                box(ex + 1, 12, 1, 1, .white)       // catchlight
+                if blink { box(ex + lx, 12 + ly, 3, 1, PetView.cEye); return }
+                box(ex + lx, 11 + ly, 3, 3, PetView.cOutline)
+                box(ex + lx, 11 + ly, 2, 2, PetView.cEye)
+                box(ex + 1 + lx, 12 + ly, 1, 1, .white)       // catchlight
             case .closed:
                 box(ex, 12, 3, 1, PetView.cEye)
             case .happy:
@@ -523,14 +634,18 @@ final class PetView: NSView {
     }
 
     private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
+        // Shift the whole eye toward the cursor (0 when not watching). The eye
+        // moving as a unit reads as the pet looking that way, and preserves the
+        // approved eye art rather than clipping a pupil inside a tiny rim.
+        let lx = eyeLook.x, ly = eyeLook.y
         let blink = e == .open && fmod(phase, 3.4) < 0.12
         switch e {
         case .open, .worried:
-            if blink { box(12, 10, 4, 1, PetView.cEye); return }
-            box(12, 9, 4, 4, PetView.cOutline)          // eye rim
-            box(12, 9, 3, 3, PetView.cEye)              // big round eye
-            box(14, 11, 1, 1, .white); box(13, 12, 1, 1, .white)  // catchlight sparkle
-            if e == .worried { box(11, 13, 4, 1, PetView.cOutline) }   // raised brow
+            if blink { box(12 + lx, 10 + ly, 4, 1, PetView.cEye); return }
+            box(12 + lx, 9 + ly, 4, 4, PetView.cOutline)          // eye rim
+            box(12 + lx, 9 + ly, 3, 3, PetView.cEye)              // big round eye
+            box(14 + lx, 11 + ly, 1, 1, .white); box(13 + lx, 12 + ly, 1, 1, .white)  // catchlight sparkle
+            if e == .worried { box(11 + lx, 13 + ly, 4, 1, PetView.cOutline) }   // raised brow
         case .closed:
             box(12, 10, 4, 1, PetView.cEye)             // content lids
             box(11, 11, 1, 1, PetView.cEye); box(15, 11, 1, 1, PetView.cEye)
@@ -751,7 +866,9 @@ enum PetApp {
         window.hasShadow = false
         window.level = .floating
         window.ignoresMouseEvents = false
-        window.isMovableByWindowBackground = true
+        // Drag + click are handled by PetView (see mouseDown/Dragged/Up) so a
+        // click can pet the dog and a drag can reposition it — the window's own
+        // background-drag would swallow that distinction, so it's left off.
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 
         let view = PetView(frame: CGRect(origin: .zero, size: winSize), state: state)

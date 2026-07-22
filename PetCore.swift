@@ -12,12 +12,18 @@ import CoreGraphics
 
 enum Mood: String {
     case greet, thinking, working, happy, worried, idle, sleeping
+    // `loved` is a *local* interaction mood: it is triggered only by clicking
+    // (petting) the dog, never travels the wire, and is absent from the
+    // `MOODS` manifest in extension.mjs. It plays a brief reaction, then
+    // auto-returns to idle and re-syncs to whatever the live session is doing.
+    case loved
 
     /// Automatic transition after a mood has been shown for `after` seconds.
     var autoNext: (after: TimeInterval, to: Mood)? {
         switch self {
         case .greet:   return (1.6, .idle)
         case .happy:   return (1.5, .idle)      // "done!" celebration, then relax
+        case .loved:   return (1.5, .idle)      // petting reaction, then relax
         case .worried: return (2.4, .idle)
         case .idle:    return (18,  .sleeping)
         default:       return nil               // thinking / working persist until the next event
@@ -83,6 +89,59 @@ enum Facing {
         var acc = 0.0
         for (f, w) in opts { acc += w; if pick < acc { return f } }
         return opts.last!.0
+    }
+}
+
+// MARK: - Cursor gaze (look-at pointer)
+//
+// When the pointer comes near, the pet watches it: its eyes shift toward the
+// cursor and its head turns via the three existing facings, instead of glancing
+// around on its own. Pure geometry so it's unit-tested without AppKit — the view
+// feeds in the vector from the pet's head to the cursor (screen points) and the
+// pet size, and `Gaze` decides whether the pointer is "near", which way to face,
+// and how far to nudge the pupils. It carries no motion of its own, so the
+// renderer suppresses it under Reduce Motion just like the autonomous glancing.
+struct Gaze {
+    var active: Bool = false   // pointer is near enough to track
+    var facing: Facing = .front
+    var pupil: CGVector = .zero // eye offset in *cells*, each component in [-1, 1]
+
+    /// Not watching anything — eyes centered, facing left to the caller.
+    static let none = Gaze()
+
+    /// - Parameters:
+    ///   - dx: horizontal offset from the pet's head to the cursor, in points (+ = cursor to the right).
+    ///   - dy: vertical offset, in points (+ = cursor above the head; AppKit y grows upward).
+    ///   - size: the pet's rendered size (`config.size`), used to scale the "near" range.
+    static func toward(dx: CGFloat, dy: CGFloat, size: CGFloat) -> Gaze {
+        let radius = size * 4                       // "near" range — generous, so it feels attentive
+        let dist = (dx * dx + dy * dy).squareRoot()
+        guard dist > 0.001, dist <= radius else { return .none }
+        // Head faces the side the cursor is clearly on; a ±size horizontal
+        // dead-zone keeps it front-on (looking at you) when the cursor is above
+        // or near the center, and prevents rapid left/right flip-flopping.
+        let facing: Facing = dx < -size ? .left : (dx > size ? .right : .front)
+        let nx = max(-1, min(1, dx / (size * 0.9)))
+        let ny = max(-1, min(1, dy / (size * 0.9)))
+        return Gaze(active: true, facing: facing, pupil: CGVector(dx: nx, dy: ny))
+    }
+}
+
+// MARK: - Click vs. drag (pet the dog without repositioning it)
+//
+// The pet body is both a drag handle (move it around the desktop) and a pet
+// target (a plain click triggers the `loved` reaction). A press is a *click*
+// only while the pointer stays within `dragThreshold` points of where it went
+// down; the moment it travels further it's a drag and no petting happens, so
+// repositioning never accidentally pets. Pure + testable; the view supplies the
+// measured travel.
+enum Interaction {
+    /// Pointer travel (points) below which a press is treated as a click.
+    static let dragThreshold: CGFloat = 4
+
+    /// Whether a press whose greatest travel was `maxDisplacement` points is a click.
+    static func isClick(maxDisplacement: CGFloat) -> Bool {
+        maxDisplacement <= dragThreshold
     }
 }
 
@@ -154,6 +213,15 @@ struct Pose {
             p.scaleY = 1 + ((1 - hop) * 0.06 - hop * 0.03) * scale
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
             p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
+        case .loved:
+            // Petting reaction: a delighted wriggle — quick little hops, a fast
+            // wagging tail and blushing (happy eyes) with a ♥. Deliberately has
+            // no accessory so it never reads as the "done!" sparkle.
+            let hop = abs(sin(phase * 7))
+            p.bob = hop * 12 * scale
+            p.scaleY = 1 + ((1 - hop) * 0.05 - hop * 0.03) * scale
+            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 14)
+            p.bubble = "♥"
         case .worried:
             // Cowering: head lowered and trembling, tail tucked.
             p.headBob = -0.7 * scale

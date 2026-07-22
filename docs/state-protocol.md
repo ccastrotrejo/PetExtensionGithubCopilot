@@ -76,6 +76,18 @@ Control signals are protocol commands, not display moods:
 | `hidden` | Swift orders the pet window out before mood mapping. |
 | `quit` | Swift terminates the pet process before mood mapping. |
 
+### Local-only moods
+
+Some moods are triggered by the pet itself and never travel the wire, so they are **not** part of
+`MOODS` and cannot be requested by the `pet_control` tool:
+
+| Mood | Trigger |
+| --- | --- |
+| `loved` | The user **clicks (pets)** the dog — a brief delighted reaction, then it auto-returns to idle. |
+
+These exist only in `pet.swift`'s `Mood` enum. When a local mood ends it re-syncs to whatever the live
+session is doing, so it never leaves the shared state machine out of sync.
+
 ## Write mechanics
 
 Each controller writes its own file atomically: it serializes the payload to `sessions/<id>.json.tmp`, then
@@ -94,3 +106,6 @@ When adding, removing, or renaming a mood, update all three authoritative mirror
 1. `extension.mjs` `MOODS`
 2. `pet.swift` `Mood`
 3. this document
+
+Local-only moods (see [Local-only moods](#local-only-moods)) are the exception: they live in `pet.swift`'s
+`Mood` and this document, but never in `extension.mjs` `MOODS`, since no controller can request them.

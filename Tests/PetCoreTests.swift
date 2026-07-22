@@ -50,6 +50,17 @@ enum PetCoreTests {
         check(worried.accessory == .sweat && worried.feat.tailDown && worried.feat.wag == 0,
               "worried: sweat, tucked tail, no wag")
 
+        // loved: the click-to-pet reaction. A delighted wriggle — happy (blushing)
+        // eyes, a fast wag and a ♥ — deliberately with NO accessory so it never
+        // reads as the "done!" sparkle.
+        check(Mood.loved.autoNext?.to == .idle && Mood.loved.autoNext?.after == 1.5, "loved → idle after 1.5s")
+        let loved = Pose.make(for: .loved, phase: 0.2, message: "")
+        check(loved.accessory == nil && loved.bubble == "♥", "loved: heart bubble, no accessory")
+        check(loved.feat.eyes == .happy && loved.feat.mouth == .smile && loved.feat.wag >= 13, "loved: happy blushing face, fast wag")
+        check(loved.bob > 0, "loved: hops with delight")
+        check(Pose.make(for: .loved, phase: 0.2, message: "custom").bubble == "♥", "loved: ignores wire message (local-only reaction)")
+        check(!Cadence.isCalm(.loved), "loved is not calm (animates at full cadence)")
+
         // MARK: Bubble — default vs. message passthrough
         check(Pose.make(for: .thinking, phase: 0, message: "").bubble == "thinking…", "thinking: default bubble")
         check(Pose.make(for: .thinking, phase: 0, message: "reticulating").bubble == "reticulating",
@@ -107,7 +118,7 @@ enum PetCoreTests {
         check(Pose.reducedMotionScale == 0.15, "reducedMotionScale is ~15%")
 
         // MARK: Reduce Motion — ambient wobble damped to ~15%, expressions untouched, per mood
-        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried] {
+        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried, .loved] {
             let phase = 0.35 // away from zero for every mood's oscillating field
             let normal = Pose.make(for: mood, phase: phase, message: "hello")
             let damped = Pose.make(for: mood, phase: phase, message: "hello", reduceMotion: true)
@@ -236,6 +247,31 @@ enum PetCoreTests {
               "antics: a real mood ignores antics (no scaleX)")
         let calmAntic = Pose.make(for: .idle, phase: 0.85, message: "", reduceMotion: true, antic: .stretch, anticPhase: 1.0)
         check(calmAntic.scaleX == 1 && calmAntic.headBob == 0, "antics: Reduce Motion suppresses antics")
+
+        // MARK: Gaze — look-at cursor geometry (pure)
+        let sz: CGFloat = 62
+        check(!Gaze.toward(dx: sz * 10, dy: 0, size: sz).active, "gaze: cursor far outside range → inactive")
+        check(!Gaze.toward(dx: 0, dy: 0, size: sz).active, "gaze: cursor exactly on the head → inactive (no direction)")
+        let gRight = Gaze.toward(dx: sz * 2, dy: 0, size: sz)
+        check(gRight.active && gRight.facing == .right && gRight.pupil.dx > 0, "gaze: cursor to the right → face right, pupils right")
+        let gLeft = Gaze.toward(dx: -sz * 2, dy: 0, size: sz)
+        check(gLeft.active && gLeft.facing == .left && gLeft.pupil.dx < 0, "gaze: cursor to the left → face left, pupils left")
+        let gUp = Gaze.toward(dx: 0, dy: sz, size: sz)
+        check(gUp.active && gUp.facing == .front && gUp.pupil.dy > 0, "gaze: cursor above center → face front (look at you), pupils up")
+        let gDown = Gaze.toward(dx: sz * 0.3, dy: -sz * 0.8, size: sz)
+        check(gDown.active && gDown.facing == .front && gDown.pupil.dy < 0, "gaze: cursor below within dead-zone → front, pupils down")
+        // Pupil offset is clamped to [-1, 1] cells in each axis.
+        let gClamp = Gaze.toward(dx: sz * 3, dy: 0, size: sz)
+        check(gClamp.pupil.dx <= 1.0 + 1e-9 && gClamp.pupil.dx >= 1.0 - 1e-9, "gaze: pupil x clamps to 1 cell")
+        check(Gaze.none.active == false && Gaze.none.pupil == .zero, "gaze: .none is inactive, centered")
+
+        // MARK: Interaction — click vs. drag disambiguation (pure)
+        check(Interaction.dragThreshold == 4, "interaction: 4pt drag threshold")
+        check(Interaction.isClick(maxDisplacement: 0), "interaction: no travel is a click")
+        check(Interaction.isClick(maxDisplacement: 3.9), "interaction: small jitter is still a click")
+        check(Interaction.isClick(maxDisplacement: 4), "interaction: exactly the threshold is a click")
+        check(!Interaction.isClick(maxDisplacement: 4.1), "interaction: past the threshold is a drag, not a pet")
+        check(!Interaction.isClick(maxDisplacement: 50), "interaction: a real drag never pets")
 
         // MARK: Arbitration — multi-session, one shared pet
         let base = 1_000_000.0  // arbitrary "now" in ms
