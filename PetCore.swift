@@ -70,7 +70,7 @@ struct Pose {
     var bubble: String? = nil
     var feat = DogFeatures()
 
-    static func make(for mood: Mood, phase: Double, message: String) -> Pose {
+    static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false) -> Pose {
         var p = Pose()
         switch mood {
         case .idle:
@@ -112,7 +112,77 @@ struct Pose {
             p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
             p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
         }
+        // Reduce Motion (accessibility): keep the expression — eyes, mouth,
+        // accessory, bubble — but hold the pet still by zeroing every motion field.
+        // Phase-driven micro-motions (blink, ear flap, panting, accessory wiggle)
+        // are frozen separately by the renderer via the same `reduceMotion` flag.
+        if reduceMotion {
+            p.bob = 0
+            p.scaleY = 1
+            p.headTilt = 0
+            p.headBob = 0
+            p.tremble = 0
+            p.feat.wag = 0
+        }
         return p
+    }
+}
+
+// MARK: - Config (user settings; hot-reloaded from config.json)
+
+/// User-adjustable settings, parsed from `config.json` next to the extension.
+/// Every field is optional in the file; missing or malformed keys keep the
+/// defaults here, so an absent or partial config is always valid. Pure and
+/// testable — no file IO lives in this type (see `docs/config.md`).
+struct PetConfig: Equatable {
+    var size: CGFloat = 62
+    var lookAroundMin: Double = 4
+    var lookAroundMax: Double = 9
+    var behaviors: Set<String> = ["lookAround", "bubbles"]
+    var muted: Bool = false
+    var reduceMotion: Bool = false
+    var breed: String = "dachshund"      // reserved for the personalization issue
+    var palette: String = "chestnut"     // reserved for the personalization issue
+
+    /// Behaviors the pet understands today. Unknown entries in the file are ignored.
+    static let knownBehaviors: Set<String> = ["lookAround", "bubbles"]
+
+    /// Seconds between autonomous glances (left / right / at-you).
+    var lookAroundInterval: ClosedRange<Double> { lookAroundMin...lookAroundMax }
+    /// Glancing around is on unless the user turns it off.
+    var lookAround: Bool { behaviors.contains("lookAround") }
+    /// Speech bubbles show only when enabled *and* not muted.
+    var bubblesEnabled: Bool { !muted && behaviors.contains("bubbles") }
+
+    /// Merge a decoded JSON object over the defaults. Wrong types are ignored so
+    /// a malformed value never crashes the pet — it falls back to the default.
+    static func parse(_ obj: [String: Any]?) -> PetConfig {
+        var c = PetConfig()
+        guard let obj = obj else { return c }
+
+        if let n = obj["size"] as? Double { c.size = CGFloat(min(160, max(32, n))) }
+
+        // lookAroundInterval: a single number (fixed) or a [min, max] pair, seconds.
+        switch obj["lookAroundInterval"] {
+        case let n as Double:
+            let v = max(1, n); c.lookAroundMin = v; c.lookAroundMax = v
+        case let arr as [Any]:
+            let nums = arr.compactMap { $0 as? Double }
+            if nums.count >= 2 {
+                c.lookAroundMin = max(1, min(nums[0], nums[1]))
+                c.lookAroundMax = max(c.lookAroundMin, max(nums[0], nums[1]))
+            }
+        default: break
+        }
+
+        if let arr = obj["enabledBehaviors"] as? [Any] {
+            c.behaviors = Set(arr.compactMap { $0 as? String }).intersection(knownBehaviors)
+        }
+        if let b = obj["muted"] as? Bool { c.muted = b }
+        if let b = obj["reduceMotion"] as? Bool { c.reduceMotion = b }
+        if let s = obj["breed"] as? String, !s.isEmpty { c.breed = s }
+        if let s = obj["palette"] as? String, !s.isEmpty { c.palette = s }
+        return c
     }
 }
 

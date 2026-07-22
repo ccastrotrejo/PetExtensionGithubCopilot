@@ -1,0 +1,9 @@
+{
+  "size": 62,
+  "lookAroundInterval": [4, 9],
+  "enabledBehaviors": ["lookAround", "bubbles"],
+  "muted": false,
+  "reduceMotion": false,
+  "breed": "dachshund",
+  "palette": "chestnut"
+}
