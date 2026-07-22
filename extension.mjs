@@ -154,6 +154,9 @@ function prettyTool(name = "") {
 }
 
 // --- Boot the pet ---
+// The pet greets ("hi!") only once per process. onSessionStart fires again on
+// every resume, so without this guard the pet would say "hi" constantly.
+let hasGreeted = false;
 let bootError = null;
 const build = ensureCompiled();
 if (!build.ok) {
@@ -162,6 +165,7 @@ if (!build.ok) {
   try {
     ensureRunning();
     setMood(MOOD.greet);
+    hasGreeted = true;
   } catch (e) {
     bootError = e.message;
   }
@@ -234,7 +238,12 @@ const petControl = {
 const session = await joinSession({
   tools: [petControl],
   hooks: {
-    onSessionStart: async () => { setMood(MOOD.greet); },
+    onSessionStart: async (input) => {
+      // Greet once per process; never on a resume (which fires repeatedly).
+      if (hasGreeted || input?.source === "resume") return;
+      hasGreeted = true;
+      setMood(MOOD.greet);
+    },
     onUserPromptSubmitted: async () => { setMood(MOOD.thinking); },
     onPreToolUse: async (input) => {
       // Stay "working" across a whole run of tools; only the label changes.
