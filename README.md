@@ -13,7 +13,7 @@ GitHub Copilot app (configurable — see `openOnDoubleClick`).
 | --- | --- |
 | Starts a session | 🐶 **greets** you 👋 (happy eyes, tail wagging) |
 | Receives a prompt | 🐶 **thinks** 💭 (head tilts) |
-| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) |
+| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) — signature tools get their own flourish: **searching** sniffs out a scent 👃, **editing** digs eagerly, **running a command** perks up alert 👂 |
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing) with occasional antics — a stretch, yawn, ear-scratch, sniff, dig, tail-chase or sit — then 😴 **sleeps** after ~18s |

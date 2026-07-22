@@ -23,7 +23,7 @@ the pure arbiter in `PetCore.swift` (`Arbitration.resolve`) to decide what the s
 ## Per-session file schema
 
 ```json
-{ "id": "b1f2…", "mood": "working", "message": "editing code", "seq": 42,
+{ "id": "b1f2…", "mood": "working", "message": "editing code", "tool": "edit", "seq": 42,
   "ts": 1699999999999, "activity": 1699999999900, "heartbeat": 1699999999999 }
 ```
 
@@ -32,6 +32,7 @@ the pure arbiter in `PetCore.swift` (`Arbitration.resolve`) to decide what the s
 | `id` | string | Stable id of the writing controller (one per process). | — |
 | `mood` | string | Current display mood or control signal. Unknown display values fall back to `idle` in Swift. | — |
 | `message` | string | Optional speech-bubble text, truncated by the controller before writing. | — |
+| `tool` | string | Raw agent tool name for the `working` mood (e.g. `edit`, `bash`, `github-mcp-server-search_code`); empty otherwise. The pet categorises it into a `WorkActivity` to pick a tool-specific micro-animation (see [Working micro-behaviors](#working-micro-behaviors)). | — |
 | `seq` | number | Monotonic counter, per controller; retained for debugging. | count |
 | `ts` | number | Last state write timestamp (any write, incl. heartbeat). | ms since Unix epoch |
 | `activity` | number | Timestamp of the last **mood change** (not heartbeat refresh). Drives most-recent-activity arbitration. | ms since Unix epoch |
@@ -63,7 +64,7 @@ parameter and are mirrored by `pet.swift`'s `Mood` enum.
 | --- | --- |
 | `greet` | The pet has just appeared or restarted. |
 | `thinking` | Copilot is considering a prompt or speaking on command. |
-| `working` | Copilot is using a tool; `message` may describe the tool activity. |
+| `working` | Copilot is using a tool; `message` may describe the tool activity and `tool` names it. |
 | `happy` | The turn finished after real work — a brief "done!" celebration. |
 | `worried` | A tool failed or an extension error occurred. |
 | `idle` | The turn is finished and the pet is relaxed. |
@@ -87,6 +88,24 @@ Some moods are triggered by the pet itself and never travel the wire, so they ar
 
 These exist only in `pet.swift`'s `Mood` enum. When a local mood ends it re-syncs to whatever the live
 session is doing, so it never leaves the shared state machine out of sync.
+
+### Working micro-behaviors
+
+The `working` mood shares one base pose (a nose-down sniff/pant), but the `tool` field lets signature
+tools animate differently. The pure `WorkActivity.from(tool:)` in `PetCore.swift` maps the raw tool name
+(reduced to its last `-`-separated segment) to a small, gated set of styles; the arbiter surfaces the
+winning working session's style as `Resolution.work`, and `WorkActivityLayer` overlays it onto the pose:
+
+| `WorkActivity` | Tools | Micro-behavior |
+| --- | --- | --- |
+| `searching` | `grep`, `glob`, `*search*` | Tracks a scent — head sweeps side to side over the sniff. |
+| `editing` | `edit`, `create`, `write` | Digs eagerly — quick paw bobs with a jabbing nose. |
+| `running` | `bash`, `shell`, `terminal`, `run` | Alert — head held high and still, listening. |
+| `general` | everything else (`view`, `sql`, most MCP tools…) | The plain working pose — kept calm so the pet isn't noisy. |
+
+The overlay is damped by Reduce Motion like every other behavior and only ever applies while `mood ==
+working`, so it never leaks into another mood. Adding a style is a pure-core change (categoriser + one
+`switch` arm) with no renderer edit; see [behaviors.md](behaviors.md).
 
 ## Write mechanics
 

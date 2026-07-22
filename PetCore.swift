@@ -275,11 +275,11 @@ struct Pose {
     /// touching this signature or the renderer's `draw()`. Kept as the stable
     /// entry point so every existing call site (and unit test) is unchanged.
     static func make(for mood: Mood, phase: Double, message: String, reduceMotion: Bool = false,
-                     antic: Antic? = nil, anticPhase: Double = 0) -> Pose {
+                     antic: Antic? = nil, anticPhase: Double = 0, work: WorkActivity = .general) -> Pose {
         let ctx = BehaviorContext(mood: mood, phase: phase, message: message,
                                   reduceMotion: reduceMotion,
                                   motionScale: reduceMotion ? reducedMotionScale : 1,
-                                  antic: antic, anticPhase: anticPhase)
+                                  antic: antic, anticPhase: anticPhase, work: work)
         return PetBehaviors.render(ctx)
     }
 }
@@ -401,6 +401,71 @@ enum IdleAntics {
     }
 }
 
+// MARK: - Work activity (tool-specific micro-behaviors)
+//
+// While the pet is `working`, its base pose is a nose-down sniff/pant that reads
+// the same for every tool. To give signature actions their own bit of life, the
+// agent's *tool name* is mapped to a small set of work styles, each overlaying a
+// distinct micro-animation onto the working pose (see `WorkActivityLayer`).
+// Categorisation is pure + unit-tested and lives only here; the controller
+// (`extension.mjs`) just forwards the raw tool name over the wire as `tool`.
+//
+// Deliberately small and gated: only a few signature tools get a bespoke motion
+// and the overlay plays *only* in `working`, so common calls (reading a file,
+// querying data) stay on the calm base pose and the pet never feels twitchy.
+
+enum WorkActivity: String, CaseIterable {
+    case searching   // grep / glob / search — tracks a scent, nose sweeping
+    case editing     // edit / create / write — eager digging
+    case running     // bash / shell / run — alert, head high, listening
+    case general     // everything else — the plain working pose
+
+    /// Map a raw tool name (possibly namespaced, e.g. "github-mcp-server-search_code")
+    /// to a work style. The last `-`-separated segment is matched, mirroring
+    /// `extension.mjs`'s `prettyTool`. Unknown tools fall back to `.general`, so
+    /// only a curated few signature tools ever animate differently.
+    static func from(tool raw: String) -> WorkActivity {
+        let name = raw.lowercased()
+        let key = name.split(separator: "-").last.map(String.init) ?? name
+        if ["grep", "glob"].contains(key) || key.contains("search") { return .searching }
+        if ["edit", "create", "write"].contains(key) { return .editing }
+        if ["bash", "shell", "terminal", "run"].contains(key) { return .running }
+        return .general
+    }
+
+    /// Overlay this work style's micro-motion onto an already-built `working`
+    /// pose. `phase` is the shared animation clock (seconds); motion is damped by
+    /// the pose's `motionScale` so Reduce Motion softens it toward the base pose
+    /// just like every other behavior. `.general` is a no-op.
+    func apply(_ p: inout Pose, phase: Double) {
+        let scale = p.motionScale
+        switch self {
+        case .general:
+            break
+        case .searching:
+            // Tracking a scent: the nose stays down (base sniff) and the head
+            // sweeps slowly side to side, following a trail.
+            p.headTilt = sin(phase * 3.0) * 0.13 * scale
+            p.feat.wag = 3
+        case .editing:
+            // Eager digging: quick paw bobs with a jabbing nose.
+            let fast = abs(sin(phase * 12))
+            p.headBob = (-0.7 - fast * 0.8) * scale
+            p.bob = fast * 3 * scale
+            p.feat.wag = 6
+        case .running:
+            // Alert and attentive: head held high, body still, listening for the
+            // command's output with a subtle side-cock instead of sniffing.
+            p.headBob = 0.5 * scale
+            p.bob = 0
+            p.headTilt = sin(phase * 2.0) * 0.06 * scale
+            p.feat.eyes = .open
+            p.feat.mouth = .neutral
+            p.feat.wag = 3
+        }
+    }
+}
+
 // MARK: - Behavior composition (pluggable frame contributors)
 //
 // A pet's on-screen frame is built by *composing* small behaviors rather than
@@ -424,6 +489,23 @@ struct BehaviorContext {
     let motionScale: CGFloat   // 1 normally, damped to ~15% under Reduce Motion
     let antic: Antic?          // idle flourish currently playing, if any
     let anticPhase: Double     // seconds since that antic began
+    let work: WorkActivity     // tool style for the working mood (else .general)
+
+    // Explicit init so `work` can default to `.general`: every existing call
+    // site (and unit test) that predates tool-specific micro-behaviors keeps
+    // compiling unchanged.
+    init(mood: Mood, phase: Double, message: String, reduceMotion: Bool,
+         motionScale: CGFloat, antic: Antic?, anticPhase: Double,
+         work: WorkActivity = .general) {
+        self.mood = mood
+        self.phase = phase
+        self.message = message
+        self.reduceMotion = reduceMotion
+        self.motionScale = motionScale
+        self.antic = antic
+        self.anticPhase = anticPhase
+        self.work = work
+    }
 }
 
 /// One frame contributor. Behaviors are side-effect-light: they mutate the
@@ -504,11 +586,22 @@ struct IdleAnticLayer: Behavior {
     }
 }
 
+/// Overlays the tool-specific micro-motion (sniff-track, dig, alert) onto the
+/// `working` pose. Only in `working` — any other mood is untouched — so a
+/// signature tool enlivens the work pose without ever fighting another mood's
+/// expression. Runs after `MoodExpression`, layering on top of its base pose.
+struct WorkActivityLayer: Behavior {
+    func apply(to p: inout Pose, _ ctx: BehaviorContext) {
+        guard ctx.mood == .working else { return }
+        ctx.work.apply(&p, phase: ctx.phase)
+    }
+}
+
 /// The active behavior pipeline and the composition entry point. New behaviors
 /// are added to `pipeline` — the renderer never changes.
 enum PetBehaviors {
     /// Ordered composition run every frame: expression first, then overlays.
-    static let pipeline: [Behavior] = [MoodExpression(), IdleAnticLayer()]
+    static let pipeline: [Behavior] = [MoodExpression(), WorkActivityLayer(), IdleAnticLayer()]
 
     /// Compose `behaviors` (defaulting to `pipeline`) into a single frame.
     /// `motionScale` is seeded on the fresh `Pose` so every behavior sees the
@@ -640,6 +733,17 @@ struct SessionSnapshot: Equatable {
     let message: String
     let activity: Double    // ms since epoch — when this session last changed mood
     let heartbeat: Double   // ms since epoch — controller liveness
+    let tool: String        // raw tool name for the working mood (empty otherwise)
+
+    init(id: String, mood: String, message: String, activity: Double,
+         heartbeat: Double, tool: String = "") {
+        self.id = id
+        self.mood = mood
+        self.message = message
+        self.activity = activity
+        self.heartbeat = heartbeat
+        self.tool = tool
+    }
 }
 
 /// What the shared pet should do this tick.
@@ -655,6 +759,14 @@ struct Resolution: Equatable {
     let command: PetCommand
     let winner: String
     let activity: Double
+    let work: WorkActivity  // tool style of the winning working session (else .general)
+
+    init(command: PetCommand, winner: String, activity: Double, work: WorkActivity = .general) {
+        self.command = command
+        self.winner = winner
+        self.activity = activity
+        self.work = work
+    }
 }
 
 enum Arbitration {
@@ -685,6 +797,7 @@ enum Arbitration {
         }!
 
         let command: PetCommand
+        var work: WorkActivity = .general
         switch winner.mood {
         case "quit":
             command = .quit
@@ -695,8 +808,10 @@ enum Arbitration {
             // De-dupe greets across processes: a session that boots while others
             // are already live shows idle instead of a redundant second "hi!".
             if mood == .greet && hadLiveSessions { mood = .idle }
+            // Only the working mood carries a tool-specific micro-behavior.
+            if mood == .working { work = WorkActivity.from(tool: winner.tool) }
             command = .show(mood, message: winner.message)
         }
-        return Resolution(command: command, winner: winner.id, activity: winner.activity)
+        return Resolution(command: command, winner: winner.id, activity: winner.activity, work: work)
     }
 }
