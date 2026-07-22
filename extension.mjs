@@ -5,6 +5,7 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,47 +29,69 @@ const MOODS = {
 };
 
 const stateDir = path.join(os.tmpdir(), "copilot-pet");
-const statePath = path.join(stateDir, "state.json");
+// One shared pet, but each session owns its own state file. The Swift pet reads
+// every file in sessionsDir and arbitrates (see docs/state-protocol.md), so
+// concurrent sessions no longer stomp one global file.
+const sessionsDir = path.join(stateDir, "sessions");
+const statePath = path.join(stateDir, "state.json"); // legacy path kept only to anchor pet's dir layout
 const pidPath = path.join(stateDir, "pet.pid");
 const logPath = path.join(stateDir, "pet.log");
 
+// A stable id for this controller process. One extension.mjs == one session.
+const sessionId = randomUUID();
+const sessionPath = path.join(sessionsDir, `${sessionId}.json`);
+
 fs.mkdirSync(stateDir, { recursive: true });
+fs.mkdirSync(sessionsDir, { recursive: true });
 fs.mkdirSync(binDir, { recursive: true });
 
-// Keep seq monotonically increasing across reloads so a reused pet picks up changes.
-let seq = readExistingSeq();
-let current = { mood: MOOD.greet, message: "" };
-
-function readExistingSeq() {
-  try {
-    const s = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    return typeof s.seq === "number" ? s.seq : 0;
-  } catch {
-    return 0;
+// Sweep session files whose controllers are long gone, so the dir stays small.
+function pruneStaleSessions() {
+  let names = [];
+  try { names = fs.readdirSync(sessionsDir); } catch { return; }
+  const now = Date.now();
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const full = path.join(sessionsDir, name);
+    try {
+      const s = JSON.parse(fs.readFileSync(full, "utf8"));
+      if (now - (s.heartbeat || 0) > 60_000) fs.rmSync(full, { force: true });
+    } catch {
+      fs.rmSync(full, { force: true });
+    }
   }
 }
+pruneStaleSessions();
+
+let seq = 0;
+let current = { mood: MOOD.greet, message: "" };
+let lastActivity = Date.now(); // timestamp of the last mood change (drives arbitration)
 
 function writeState() {
   const payload = JSON.stringify({
+    id: sessionId,
     mood: current.mood,
     message: current.message,
     seq,
     ts: Date.now(),
+    activity: lastActivity,
     heartbeat: Date.now(),
   });
-  const tmp = `${statePath}.tmp`;
+  const tmp = `${sessionPath}.tmp`;
   fs.writeFileSync(tmp, payload);
-  fs.renameSync(tmp, statePath); // atomic
+  fs.renameSync(tmp, sessionPath); // atomic
 }
 
 function setMood(mood, message = "") {
   current = { mood, message: String(message).slice(0, 48) };
   seq += 1;
+  lastActivity = Date.now(); // a mood change is "activity"; heartbeats are not
   writeState();
 }
 
 function touchHeartbeat() {
-  // Refresh heartbeat without changing mood (same seq -> pet keeps current mood).
+  // Refresh heartbeat without changing mood or activity, so this session stays
+  // "live" for the watchdog but doesn't win arbitration over a more recent one.
   writeState();
 }
 
@@ -154,8 +177,10 @@ function prettyTool(name = "") {
 }
 
 // --- Boot the pet ---
-// The pet greets ("hi!") only once per process. onSessionStart fires again on
-// every resume, so without this guard the pet would say "hi" constantly.
+// Greet de-dup now lives in the pure arbiter (PetCore.swift): a greet only
+// plays on the 0→N live-session transition, so opening many sessions never
+// triggers a chorus of "hi!"s. This process still greets on start; the pet
+// decides whether to actually show it.
 let hasGreeted = false;
 let bootError = null;
 const build = ensureCompiled();
@@ -163,12 +188,25 @@ if (!build.ok) {
   bootError = build.error;
 } else {
   try {
+    setMood(MOOD.greet); // write our session file *before* spawning the pet
     ensureRunning();
-    setMood(MOOD.greet);
     hasGreeted = true;
   } catch (e) {
     bootError = e.message;
   }
+}
+
+// Remove this session's state file when the controller goes away, so it stops
+// competing for the pet. Heartbeat staleness is the backstop if we're killed hard.
+let cleanedUp = false;
+function cleanupSession() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  try { fs.rmSync(sessionPath, { force: true }); } catch {}
+}
+process.on("exit", cleanupSession);
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => { cleanupSession(); process.exit(0); });
 }
 
 // Refresh heartbeat so the pet knows the app/session is alive.
