@@ -2,9 +2,10 @@
 
 A native macOS desktop companion (inspired by [pets-therapy.com](https://pets-therapy.com/)) that
 reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot extension** and renders a
-**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered).
-**Double-click it** to jump to the GitHub Copilot app (configurable — see `openOnDoubleClick`). It
-glances around on its own — looking left, right, or straight at you.
+**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered). It
+**watches your cursor** when it comes near, **glances around** on its own — looking left, right, or
+straight at you. **Click it to pet it** for a happy little wriggle, or **double-click** to jump to the
+GitHub Copilot app (configurable — see `openOnDoubleClick`).
 
 ![The pet across its seven moods](assets/preview.png)
 
@@ -16,6 +17,8 @@ glances around on its own — looking left, right, or straight at you.
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing) with occasional antics — a stretch, yawn, ear-scratch, sniff, dig, tail-chase or sit — then 😴 **sleeps** after ~18s |
+| You move the cursor near | 🐶 **watches your pointer** 👀 (eyes track it, head turns) |
+| You click it | 🐶 gets **petted** 💗 (blushes, hops, tail wags fast) — a click, not a drag |
 
 ## Animation & accessibility
 
@@ -81,7 +84,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | --- | --- | --- |
 | `size` | `62` | Pet size (points), `32`–`160`. |
 | `lookAroundInterval` | `[4, 9]` | Seconds between glances (number or `[min, max]`). |
-| `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing / speech bubbles. |
+| `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing + cursor-watching / speech bubbles. |
 | `muted` | `false` | Suppress all speech bubbles. |
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` / `palette` | `dachshund` / `chestnut` | Reserved for personalization (parsed, not yet rendered). |
