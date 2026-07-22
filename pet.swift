@@ -138,12 +138,14 @@ final class PetView: NSView {
         needsDisplay = true
     }
 
-    // Grow/shrink the window to fit the configured pet size, keeping the
-    // bottom-left origin so the pet doesn't jump when resized.
+    // Grow/shrink the window to fit the configured pet size. The pet is drawn
+    // bottom-centered, so we keep the bottom edge and horizontal center fixed
+    // (grow symmetrically about the center) so it doesn't jump when resized.
     private func resizeWindow() {
         guard let win = self.window else { return }
         let newSize = windowSize(for: petSize)
         var frame = win.frame
+        frame.origin.x -= (newSize.width - frame.size.width) / 2   // keep center
         frame.size = newSize
         win.setFrame(frame, display: true)
         self.frame = CGRect(origin: .zero, size: newSize)
