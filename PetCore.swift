@@ -60,6 +60,98 @@ enum Cadence {
     }
 }
 
+// MARK: - Coat palettes (personalization)
+//
+// Pure colour data (no AppKit) so palette selection stays unit-testable;
+// pet.swift maps each RGBA to an NSColor at draw time. Adding a new breed colour
+// is just one more entry in `Palette.all`.
+
+/// Straight RGBA components in 0…1 — an AppKit-free stand-in for a colour.
+struct RGBA: Equatable {
+    var r: Double, g: Double, b: Double, a: Double
+    init(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) {
+        self.r = r; self.g = g; self.b = b; self.a = a
+    }
+}
+
+/// A dachshund coat colour scheme. Only the coat and its markings are
+/// parameterized; facial accents (nose, eye, tongue, blush) stay constant since
+/// they read cleanly on every coat.
+struct Palette: Equatable {
+    let name: String
+    let outline, body, bodyHi, shade, dark, tan, tanShade, saddle: RGBA
+
+    /// Every selectable palette. `chestnut` is first and is the default.
+    static let all: [Palette] = [chestnut, blackAndTan, red, cream]
+
+    /// Look up a palette by (case-insensitive) name, falling back to the default
+    /// `chestnut` for an unknown or empty name so a typo never breaks rendering.
+    static func named(_ n: String) -> Palette {
+        let key = n.trimmingCharacters(in: .whitespaces).lowercased()
+        return all.first { $0.name == key } ?? chestnut
+    }
+
+    // Classic red-and-tan — the original hand-tuned coat.
+    static let chestnut = Palette(
+        name: "chestnut",
+        outline:  RGBA(0.17, 0.10, 0.07),
+        body:     RGBA(0.64, 0.37, 0.18),
+        bodyHi:   RGBA(0.77, 0.51, 0.28),
+        shade:    RGBA(0.44, 0.24, 0.19),
+        dark:     RGBA(0.38, 0.21, 0.11),
+        tan:      RGBA(0.91, 0.73, 0.50),
+        tanShade: RGBA(0.78, 0.58, 0.38),
+        saddle:   RGBA(0.33, 0.17, 0.09))
+
+    // Black-and-tan — charcoal coat (not pure black, so shading still reads)
+    // with rich tan points on the belly, muzzle and paws.
+    static let blackAndTan = Palette(
+        name: "black-and-tan",
+        outline:  RGBA(0.06, 0.05, 0.05),
+        body:     RGBA(0.20, 0.18, 0.17),
+        bodyHi:   RGBA(0.33, 0.30, 0.28),
+        shade:    RGBA(0.13, 0.12, 0.11),
+        dark:     RGBA(0.10, 0.09, 0.09),
+        tan:      RGBA(0.80, 0.55, 0.28),
+        tanShade: RGBA(0.64, 0.42, 0.20),
+        saddle:   RGBA(0.08, 0.07, 0.07))
+
+    // Solid red/ginger — warm all over with a low-contrast, same-hue saddle.
+    static let red = Palette(
+        name: "red",
+        outline:  RGBA(0.34, 0.15, 0.07),
+        body:     RGBA(0.74, 0.37, 0.15),
+        bodyHi:   RGBA(0.87, 0.52, 0.23),
+        shade:    RGBA(0.55, 0.26, 0.12),
+        dark:     RGBA(0.60, 0.28, 0.11),
+        tan:      RGBA(0.93, 0.69, 0.41),
+        tanShade: RGBA(0.81, 0.55, 0.31),
+        saddle:   RGBA(0.58, 0.26, 0.10))
+
+    // Cream/blond — a pale coat; the outline warms to soft brown so it doesn't
+    // read as harsh black against the light body.
+    static let cream = Palette(
+        name: "cream",
+        outline:  RGBA(0.46, 0.35, 0.23),
+        body:     RGBA(0.87, 0.75, 0.55),
+        bodyHi:   RGBA(0.94, 0.85, 0.66),
+        shade:    RGBA(0.73, 0.60, 0.42),
+        dark:     RGBA(0.68, 0.55, 0.37),
+        tan:      RGBA(0.95, 0.88, 0.72),
+        tanShade: RGBA(0.85, 0.74, 0.56),
+        saddle:   RGBA(0.72, 0.58, 0.40))
+}
+
+// MARK: - Sprite geometry
+
+enum Sprite {
+    /// Side length (points) of one pixel-art cell for a pet of `size` points.
+    /// Rounded to a whole number so every cell lands on integer point
+    /// boundaries — the sprite scales crisply (no half-pixel cells) at any
+    /// configured size. Shared by the renderer's body/head/shadow passes.
+    static func cell(forSize s: CGFloat) -> CGFloat { max(2, (s / 26).rounded()) }
+}
+
 // MARK: - Expression model
 
 enum EyeState { case open, closed, happy, worried }
@@ -302,11 +394,17 @@ struct PetConfig: Equatable {
     var behaviors: Set<String> = ["lookAround", "bubbles"]
     var muted: Bool = false
     var reduceMotion: Bool = false
-    var breed: String = "dachshund"      // reserved for the personalization issue
-    var palette: String = "chestnut"     // reserved for the personalization issue
+    var breed: String = "dachshund"      // reserved: only the dachshund is drawn today
+    var palette: String = "chestnut"     // coat colour scheme (see Palette.named)
+    var name: String = ""                // optional pet name, surfaced subtly (tooltip + greet)
+    var speed: Double = 1                // animation speed multiplier (0.5…2.0)
 
     /// Behaviors the pet understands today. Unknown entries in the file are ignored.
     static let knownBehaviors: Set<String> = ["lookAround", "bubbles"]
+
+    /// The coat colour scheme to render, resolved from `palette` (falls back to
+    /// the default coat for an unknown name).
+    var resolvedPalette: Palette { Palette.named(palette) }
 
     /// Seconds between autonomous glances (left / right / at-you).
     var lookAroundInterval: ClosedRange<Double> { lookAroundMin...lookAroundMax }
@@ -343,6 +441,8 @@ struct PetConfig: Equatable {
         if let b = obj["reduceMotion"] as? Bool { c.reduceMotion = b }
         if let s = obj["breed"] as? String, !s.isEmpty { c.breed = s }
         if let s = obj["palette"] as? String, !s.isEmpty { c.palette = s }
+        if let s = obj["name"] as? String { c.name = String(s.prefix(24)) }
+        if let n = obj["speed"] as? Double { c.speed = min(2, max(0.5, n)) }
         return c
     }
 }

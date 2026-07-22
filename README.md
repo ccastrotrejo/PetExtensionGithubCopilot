@@ -78,12 +78,15 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 
 | Key | Default | Effect |
 | --- | --- | --- |
-| `size` | `62` | Pet size (points), `32`–`160`. |
+| `size` | `62` | Pet size (points), `32`–`160`. Integer cell sizing keeps it crisp. |
+| `speed` | `1` | Animation speed multiplier, `0.5`–`2.0`. |
+| `palette` | `chestnut` | Coat colour: `chestnut`, `black-and-tan`, `red`, or `cream`. |
+| `name` | `""` | Name your pet — shown on hover and in its greeting. |
 | `lookAroundInterval` | `[4, 9]` | Seconds between glances (number or `[min, max]`). |
 | `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing / speech bubbles. |
 | `muted` | `false` | Suppress all speech bubbles. |
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
-| `breed` / `palette` | `dachshund` / `chestnut` | Reserved for personalization (parsed, not yet rendered). |
+| `breed` | `dachshund` | Reserved for personalization (parsed, only the dachshund is drawn). |
 
 Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
 reference: [`docs/config.md`](docs/config.md).

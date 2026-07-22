@@ -51,6 +51,13 @@ final class PetView: NSView {
         self.state = state
         super.init(frame: frame)
         self.wantsLayer = true
+        // Seed the coat + tooltip from the config the bootstrap already parsed, so
+        // a non-default palette/name is correct on the very first frame (the
+        // bootstrap has already stamped configMTime, so loadConfig won't re-run
+        // until the file next changes).
+        self.coat = Coat(state.config.resolvedPalette)
+        self.coatPalette = state.config.palette
+        self.toolTip = state.config.name.isEmpty ? nil : state.config.name
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -120,8 +127,9 @@ final class PetView: NSView {
 
         // Only advance the animation clock while something can actually be
         // seen; a hidden/occluded pet still needs to poll state + heartbeat,
-        // but there is nothing to animate or redraw.
-        if visible { state.phase += dt }
+        // but there is nothing to animate or redraw. `speed` scales the clock so
+        // the whole animation (breathing, wag, antics) runs faster or slower.
+        if visible { state.phase += dt * state.config.speed }
 
         // Occasionally turn to look right / left / at you (skip the first frame
         // so the initial facing sticks). Honors the lookAround behavior and
@@ -228,6 +236,11 @@ final class PetView: NSView {
         state.config = newConfig
         if !newConfig.lookAround { state.facing = .front }   // stop mid-glance
         if newConfig.size != oldSize { resizeWindow() }
+        if newConfig.palette != coatPalette {                // rebuild coat only on change
+            coatPalette = newConfig.palette
+            coat = Coat(newConfig.resolvedPalette)
+        }
+        self.toolTip = newConfig.name.isEmpty ? nil : newConfig.name   // subtle: name on hover
         needsDisplay = true
     }
 
@@ -296,7 +309,7 @@ final class PetView: NSView {
         // Contact shadow — a crisp pixel oval hugging the paws on the ground
         // line. It shrinks and fades as the dog bounces up, so a jump reads as
         // leaving the ground rather than the whole dog floating.
-        let scell = max(2, (petSize / 26).rounded())
+        let scell = Sprite.cell(forSize: petSize)
         let ground = (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
         let shrink = max(0.5, 1 - pose.bob / 34)
         let halfW = (petSize * 0.55 * shrink / scell).rounded() * scell
@@ -344,26 +357,38 @@ final class PetView: NSView {
             ctx.restoreGState()
         }
 
-        // Speech bubble (suppressed when muted or the bubbles behavior is off)
+        // Speech bubble (suppressed when muted or the bubbles behavior is off).
+        // A named pet introduces itself on greet — a subtle, once-per-session touch.
         if state.config.bubblesEnabled, let text = pose.bubble, !text.isEmpty {
-            drawBubble(text, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
+            let name = state.config.name
+            let shown = (state.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
+            drawBubble(shown, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
         }
     }
 
     // MARK: Pixel-art dachshund
 
-    private static let cOutline  = NSColor(red: 0.17, green: 0.10, blue: 0.07, alpha: 1)
-    private static let cBody     = NSColor(red: 0.64, green: 0.37, blue: 0.18, alpha: 1)
-    private static let cBodyHi   = NSColor(red: 0.77, green: 0.51, blue: 0.28, alpha: 1) // warm highlight
-    private static let cShade    = NSColor(red: 0.44, green: 0.24, blue: 0.19, alpha: 1) // hue-shifted shadow
-    private static let cDark     = NSColor(red: 0.38, green: 0.21, blue: 0.11, alpha: 1) // ears / tail
-    private static let cTan      = NSColor(red: 0.91, green: 0.73, blue: 0.50, alpha: 1) // belly / muzzle / paws
-    private static let cTanShade = NSColor(red: 0.78, green: 0.58, blue: 0.38, alpha: 1)
+    // Coat colours resolved from the active palette (config.palette). Facial
+    // accents (nose/eye/tongue/blush, below) are palette-independent — they read
+    // on every coat. The coat is rebuilt only when the palette name changes (see
+    // loadConfig) so box() stays allocation-free per frame.
+    private struct Coat {
+        let outline, body, bodyHi, shade, dark, tan, tanShade, saddle: NSColor
+        init(_ p: Palette) {
+            func c(_ v: RGBA) -> NSColor {
+                NSColor(red: CGFloat(v.r), green: CGFloat(v.g), blue: CGFloat(v.b), alpha: CGFloat(v.a))
+            }
+            outline = c(p.outline); body = c(p.body); bodyHi = c(p.bodyHi); shade = c(p.shade)
+            dark = c(p.dark); tan = c(p.tan); tanShade = c(p.tanShade); saddle = c(p.saddle)
+        }
+    }
+    private var coat = Coat(.chestnut)
+    private var coatPalette = "chestnut"   // name the current `coat` was built from
+
     private static let cNose     = NSColor(red: 0.15, green: 0.10, blue: 0.09, alpha: 1)
     private static let cEye      = NSColor(red: 0.13, green: 0.10, blue: 0.10, alpha: 1)
     private static let cTongue   = NSColor(red: 0.92, green: 0.44, blue: 0.47, alpha: 1)
     private static let cCheek    = NSColor(red: 0.95, green: 0.58, blue: 0.52, alpha: 0.55)
-    private static let cSaddle   = NSColor(red: 0.33, green: 0.17, blue: 0.09, alpha: 1) // dark back marking
 
     /// Draws a chibi pixel-art dachshund centred at the origin, facing right.
     /// The body is drawn first, then the head as a separate group that can tilt,
@@ -371,7 +396,7 @@ final class PetView: NSView {
     /// than sliding the whole picture around.
     private func drawDachshundPixel(size s: CGFloat, pose: Pose, phase: Double) {
         let feat = pose.feat
-        let cell = max(2, (s / 26).rounded())
+        let cell = Sprite.cell(forSize: s)
         let footY = (-0.44 * s).rounded()
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
@@ -390,22 +415,22 @@ final class PetView: NSView {
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
             if feat.tailDown {
-                p(-16, 2, 2, 3, PetView.cDark); p(-17, 1, 2, 2, PetView.cDark)
+                p(-16, 2, 2, 3, coat.dark); p(-17, 1, 2, 2, coat.dark)
             } else {
-                p(-16, 5, 2, 2, PetView.cDark); p(-17, 7, 2, 2, PetView.cDark)
-                p(-18 + wag, 9, 2, 2, PetView.cDark)         // curled tip
+                p(-16, 5, 2, 2, coat.dark); p(-17, 7, 2, 2, coat.dark)
+                p(-18 + wag, 9, 2, 2, coat.dark)         // curled tip
             }
-            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, PetView.cBody) }   // stubby legs
-            p(-15, 3, 25, 5, PetView.cBody)                  // long low sausage
-            p(-14, 8, 23, 1, PetView.cBody); p(-14, 2, 23, 1, PetView.cBody)
+            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, coat.body) }   // stubby legs
+            p(-15, 3, 25, 5, coat.body)                  // long low sausage
+            p(-14, 8, 23, 1, coat.body); p(-14, 2, 23, 1, coat.body)
         }
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, PetView.cOutline) }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, coat.outline) }
         bodySolids(0, 0, nil)
-        box(-14, 6, 21, 3, PetView.cSaddle)         // dark saddle wraps the back
-        box(-13, 8, 21, 1, PetView.cBodyHi)         // warm topline highlight
-        box(-14, 2, 23, 2, PetView.cTan)            // tan belly (bottom rows)
-        box(-14, 2, 23, 1, PetView.cTanShade)       // shadow at the very bottom edge
-        for lx in [-13, -9, 5, 9] { box(lx, 0, 3, 1, PetView.cTan) }   // paws
+        box(-14, 6, 21, 3, coat.saddle)         // dark saddle wraps the back
+        box(-13, 8, 21, 1, coat.bodyHi)         // warm topline highlight
+        box(-14, 2, 23, 2, coat.tan)            // tan belly (bottom rows)
+        box(-14, 2, 23, 1, coat.tanShade)       // shadow at the very bottom edge
+        for lx in [-13, -9, 5, 9] { box(lx, 0, 3, 1, coat.tan) }   // paws
 
         // ---- HEAD: head, snout, ear, face — animated around the neck pivot ----
         let jitter = pose.tremble > 0 ? CGFloat(Int((sin(phase * 34) * pose.tremble).rounded())) : 0
@@ -417,16 +442,16 @@ final class PetView: NSView {
 
         func headSolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
-            p(7, 5, 11, 9, PetView.cBody)                    // big round head
-            p(8, 14, 9, 1, PetView.cBody); p(8, 4, 9, 1, PetView.cBody)
-            p(16, 5, 6, 4, PetView.cBody); p(21, 6, 2, 2, PetView.cBody)   // long snout
-            p(7 + ear, 3, 4, 10, PetView.cDark); p(8, 2, 3, 1, PetView.cDark)   // floppy ear
+            p(7, 5, 11, 9, coat.body)                    // big round head
+            p(8, 14, 9, 1, coat.body); p(8, 4, 9, 1, coat.body)
+            p(16, 5, 6, 4, coat.body); p(21, 6, 2, 2, coat.body)   // long snout
+            p(7 + ear, 3, 4, 10, coat.dark); p(8, 2, 3, 1, coat.dark)   // floppy ear
         }
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, PetView.cOutline) }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, coat.outline) }
         headSolids(0, 0, nil)
-        box(5, 4, 12, 2, PetView.cTan)              // tan chest/neck (also hides the seam)
-        box(8, 13, 8, 1, PetView.cBodyHi)           // head highlight
-        box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
+        box(5, 4, 12, 2, coat.tan)              // tan chest/neck (also hides the seam)
+        box(8, 13, 8, 1, coat.bodyHi)           // head highlight
+        box(16, 5, 6, 2, coat.tan)              // tan under the snout
         box(20, 5, 3, 3, PetView.cNose)             // nose at the snout tip
         if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
         drawEye(feat.eyes, box: box, phase: phase)
@@ -438,7 +463,7 @@ final class PetView: NSView {
     /// front paws. Symmetric around x = 0. Head group animates (tilt/sniff/tremble).
     private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double) {
         let feat = pose.feat
-        let cell = max(2, (s / 26).rounded())
+        let cell = Sprite.cell(forSize: s)
         let footY = (-0.44 * s).rounded()
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
 
@@ -452,14 +477,14 @@ final class PetView: NSView {
         // ---- BODY: two front legs + chest ----
         func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
-            p(-5, 0, 3, 4, PetView.cBody); p(2, 0, 3, 4, PetView.cBody)   // front legs
-            p(-6, 2, 12, 6, PetView.cBody); p(-5, 8, 10, 1, PetView.cBody)   // chest
+            p(-5, 0, 3, 4, coat.body); p(2, 0, 3, 4, coat.body)   // front legs
+            p(-6, 2, 12, 6, coat.body); p(-5, 8, 10, 1, coat.body)   // chest
         }
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, PetView.cOutline) }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, coat.outline) }
         bodySolids(0, 0, nil)
-        box(-1, 2, 2, 6, PetView.cTan)              // tan chest blaze
-        box(-5, 0, 3, 1, PetView.cTan); box(2, 0, 3, 1, PetView.cTan)   // paw tips
-        box(-6, 8, 12, 1, PetView.cBodyHi)          // chest top highlight
+        box(-1, 2, 2, 6, coat.tan)              // tan chest blaze
+        box(-5, 0, 3, 1, coat.tan); box(2, 0, 3, 1, coat.tan)   // paw tips
+        box(-6, 8, 12, 1, coat.bodyHi)          // chest top highlight
 
         // ---- HEAD group: head, ears, face (tilts / bobs / trembles) ----
         let jitter = pose.tremble > 0 ? CGFloat(Int((sin(phase * 34) * pose.tremble).rounded())) : 0
@@ -471,15 +496,15 @@ final class PetView: NSView {
 
         func headSolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
-            p(-7, 7, 14, 9, PetView.cBody)                       // big round head
-            p(-6, 16, 12, 1, PetView.cBody); p(-6, 6, 12, 1, PetView.cBody)
-            p(-9, 8 + ear, 3, 8, PetView.cDark); p(6, 8 - ear, 3, 8, PetView.cDark)   // floppy ears
+            p(-7, 7, 14, 9, coat.body)                       // big round head
+            p(-6, 16, 12, 1, coat.body); p(-6, 6, 12, 1, coat.body)
+            p(-9, 8 + ear, 3, 8, coat.dark); p(6, 8 - ear, 3, 8, coat.dark)   // floppy ears
         }
-        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, PetView.cOutline) }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, coat.outline) }
         headSolids(0, 0, nil)
-        box(-6, 15, 12, 1, PetView.cSaddle)         // dark cap on top of the head
-        box(-5, 14, 10, 1, PetView.cBodyHi)         // head highlight
-        box(-3, 8, 6, 3, PetView.cTan)              // tan muzzle
+        box(-6, 15, 12, 1, coat.saddle)         // dark cap on top of the head
+        box(-5, 14, 10, 1, coat.bodyHi)         // head highlight
+        box(-3, 8, 6, 3, coat.tan)              // tan muzzle
         box(-1, 9, 2, 2, PetView.cNose)             // nose (center)
         if feat.eyes == .happy { box(-6, 10, 2, 2, PetView.cCheek); box(4, 10, 2, 2, PetView.cCheek) }
 
@@ -489,7 +514,7 @@ final class PetView: NSView {
             switch feat.eyes {
             case .open, .worried:
                 if blink { box(ex, 12, 3, 1, PetView.cEye); return }
-                box(ex, 11, 3, 3, PetView.cOutline)
+                box(ex, 11, 3, 3, coat.outline)
                 box(ex, 11, 2, 2, PetView.cEye)
                 box(ex + 1, 12, 1, 1, .white)       // catchlight
             case .closed:
@@ -500,7 +525,7 @@ final class PetView: NSView {
         }
         frontEye(-5); frontEye(2)
         if feat.eyes == .worried {                  // brows angled inward = fretting
-            box(-5, 14, 2, 1, PetView.cOutline); box(3, 14, 2, 1, PetView.cOutline)
+            box(-5, 14, 2, 1, coat.outline); box(3, 14, 2, 1, coat.outline)
         }
 
         // Mouth (centered, below the nose)
@@ -527,10 +552,10 @@ final class PetView: NSView {
         switch e {
         case .open, .worried:
             if blink { box(12, 10, 4, 1, PetView.cEye); return }
-            box(12, 9, 4, 4, PetView.cOutline)          // eye rim
+            box(12, 9, 4, 4, coat.outline)          // eye rim
             box(12, 9, 3, 3, PetView.cEye)              // big round eye
             box(14, 11, 1, 1, .white); box(13, 12, 1, 1, .white)  // catchlight sparkle
-            if e == .worried { box(11, 13, 4, 1, PetView.cOutline) }   // raised brow
+            if e == .worried { box(11, 13, 4, 1, coat.outline) }   // raised brow
         case .closed:
             box(12, 10, 4, 1, PetView.cEye)             // content lids
             box(11, 11, 1, 1, PetView.cEye); box(15, 11, 1, 1, PetView.cEye)
@@ -570,7 +595,6 @@ final class PetView: NSView {
     private static let cCloud     = NSColor(white: 1.00, alpha: 0.97)
     private static let cCloudEdge = NSColor(white: 0.72, alpha: 1)
     private static let cZ         = NSColor(red: 0.22, green: 0.46, blue: 0.86, alpha: 1)
-    private static let cPaw       = NSColor(red: 0.90, green: 0.70, blue: 0.48, alpha: 1)
 
     private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double, motionScale: CGFloat) {
         let u: CGFloat = 3                      // same pixel unit as the dog body
@@ -627,12 +651,12 @@ final class PetView: NSView {
             b(1.7, 1.4 + r, 1.6, 0.6, PetView.cZ)
         case .wave:
             let dx = CGFloat(sin(phase * 7)) * 0.4 * motionScale   // waving paw
-            b(-1.5 + dx, -1.5, 3, 3, PetView.cPaw)          // palm
-            b(-1.5 + dx, 1.4, 0.8, 0.9, PetView.cPaw)       // toes
-            b(-0.4 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
-            b(0.7 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
-            b(-2.4 + dx, -0.3, 0.9, 1.2, PetView.cPaw)      // thumb
-            b(-1.0 + dx, -1.1, 0.7, 0.7, PetView.cShade)    // pad
+            b(-1.5 + dx, -1.5, 3, 3, coat.tan)          // palm
+            b(-1.5 + dx, 1.4, 0.8, 0.9, coat.tan)       // toes
+            b(-0.4 + dx, 1.4, 0.8, 0.9, coat.tan)
+            b(0.7 + dx, 1.4, 0.8, 0.9, coat.tan)
+            b(-2.4 + dx, -0.3, 0.9, 1.2, coat.tan)      // thumb
+            b(-1.0 + dx, -1.1, 0.7, 0.7, coat.shade)    // pad
         }
     }
 

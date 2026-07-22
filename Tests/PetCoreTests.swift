@@ -163,7 +163,42 @@ enum PetCoreTests {
 
         check(PetConfig.parse(["reduceMotion": true]).reduceMotion, "config: reduceMotion parsed")
         check(PetConfig.parse(["breed": "corgi"]).breed == "corgi", "config: breed parsed (reserved)")
-        check(PetConfig.parse(["palette": "gray"]).palette == "gray", "config: palette parsed (reserved)")
+        check(PetConfig.parse(["palette": "red"]).palette == "red", "config: palette parsed")
+
+        // name: optional, defaults empty, clamped to a sane length.
+        check(defaults.name == "" && defaults.speed == 1, "config: name empty + speed 1 by default")
+        check(PetConfig.parse(["name": "Rex"]).name == "Rex", "config: name parsed")
+        check(PetConfig.parse(["name": String(repeating: "x", count: 40)]).name.count == 24,
+              "config: name clamped to 24 chars")
+
+        // speed: clamped to 0.5…2.0.
+        check(PetConfig.parse(["speed": 1.5]).speed == 1.5, "config: speed parsed")
+        check(PetConfig.parse(["speed": 0.1]).speed == 0.5, "config: speed clamps up to 0.5")
+        check(PetConfig.parse(["speed": 9.0]).speed == 2.0, "config: speed clamps down to 2.0")
+
+        // resolvedPalette maps the name to a coat (unknown → default chestnut).
+        check(PetConfig.parse(["palette": "cream"]).resolvedPalette == Palette.cream, "config: resolvedPalette maps name")
+        check(PetConfig.parse(["palette": "nope"]).resolvedPalette == Palette.chestnut, "config: resolvedPalette falls back")
+
+        // MARK: Palette — selectable coats + case-insensitive lookup + fallback
+        check(Palette.all.count >= 3, "palette: at least 3 selectable coats")
+        check(Palette.all.first == Palette.chestnut, "palette: chestnut is the default (first)")
+        check(Palette.named("chestnut") == Palette.chestnut, "palette: exact name lookup")
+        check(Palette.named("BLACK-AND-TAN") == Palette.blackAndTan, "palette: case-insensitive lookup")
+        check(Palette.named("  red  ") == Palette.red, "palette: whitespace-trimmed lookup")
+        check(Palette.named("bogus") == Palette.chestnut, "palette: unknown name falls back to chestnut")
+        check(Palette.named("") == Palette.chestnut, "palette: empty name falls back to chestnut")
+        check(Set(Palette.all.map { $0.name }).count == Palette.all.count, "palette: names are unique")
+
+        // MARK: Sprite.cell — integer cell sizing keeps the sprite crisp at any size
+        for s in stride(from: 32.0, through: 160.0, by: 1.0) {
+            let cell = Sprite.cell(forSize: CGFloat(s))
+            if cell != cell.rounded() || cell < 2 {
+                check(false, "sprite: cell(\(s)) = \(cell) is a whole number >= 2"); break
+            }
+        }
+        check(Sprite.cell(forSize: 62) == 2, "sprite: cell(62) == 2")
+        check(Sprite.cell(forSize: 160) == 6, "sprite: cell(160) == 6")
 
         // Wrong types fall back to defaults rather than crashing.
         check(PetConfig.parse(["size": "big"]).size == 62, "config: bad type falls back to default")
