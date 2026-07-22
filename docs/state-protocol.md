@@ -27,7 +27,7 @@ parameter and are mirrored by `pet.swift`'s `Mood` enum.
 | `greet` | The pet has just appeared or restarted. |
 | `thinking` | Copilot is considering a prompt or speaking on command. |
 | `working` | Copilot is using a tool; `message` may describe the tool activity. |
-| `happy` | A tool completed successfully. |
+| `happy` | The turn finished after real work — a brief "done!" celebration. |
 | `worried` | A tool failed or an extension error occurred. |
 | `idle` | The turn is finished and the pet is relaxed. |
 | `sleeping` | The pet has been idle long enough to sleep. |

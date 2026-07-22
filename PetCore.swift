@@ -17,10 +17,10 @@ enum Mood: String {
     var autoNext: (after: TimeInterval, to: Mood)? {
         switch self {
         case .greet:   return (1.6, .idle)
-        case .happy:   return (1.3, .thinking)
-        case .worried: return (2.4, .thinking)
+        case .happy:   return (1.5, .idle)      // "done!" celebration, then relax
+        case .worried: return (2.4, .idle)
         case .idle:    return (18,  .sleeping)
-        default:       return nil
+        default:       return nil               // thinking / working persist until the next event
         }
     }
 }

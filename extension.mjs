@@ -237,21 +237,23 @@ const session = await joinSession({
     onSessionStart: async () => { setMood(MOOD.greet); },
     onUserPromptSubmitted: async () => { setMood(MOOD.thinking); },
     onPreToolUse: async (input) => {
-      // Don't let the pet react to its own control tool.
+      // Stay "working" across a whole run of tools; only the label changes.
       if (input?.toolName === "pet_control") return;
       setMood(MOOD.working, prettyTool(input?.toolName));
     },
-    onPostToolUse: async (input) => {
-      if (input?.toolName === "pet_control") return;
-      setMood(MOOD.happy);
-    },
+    // No per-tool reaction on success: the pet keeps "working" until the turn
+    // ends, so it doesn't flash "done!" between every tool call.
     onPostToolUseFailure: async () => { setMood(MOOD.worried); },
     onErrorOccurred: async () => { setMood(MOOD.worried); },
   },
 });
 
-// Idle event -> pet relaxes (and drifts to sleep after a while).
-session.on("session.idle", () => { setMood(MOOD.idle); });
+// Turn finished: celebrate "done!" only if the pet was actually mid-task,
+// otherwise just relax. Avoids a spurious "done!" at startup or while idle.
+session.on("session.idle", () => {
+  const wasBusy = current.mood === MOOD.working || current.mood === MOOD.thinking;
+  setMood(wasBusy ? MOOD.happy : MOOD.idle);
+});
 
 if (bootError) {
   await session.log(`🐾 Copilot pet couldn't start: ${bootError}`, { level: "warning" });

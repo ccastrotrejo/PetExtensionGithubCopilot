@@ -105,21 +105,22 @@ overlay. (`-O` builds took ~44s in testing — too slow for a load-time step.)
 | session starts | `onSessionStart` | `greet` |
 | prompt submitted | `onUserPromptSubmitted` | `thinking` |
 | tool about to run | `onPreToolUse` | `working` (+ friendly tool label) |
-| tool succeeded | `onPostToolUse` | `happy` |
 | tool failed | `onPostToolUseFailure` | `worried` |
 | error occurred | `onErrorOccurred` | `worried` |
-| turn finished | `session.on("session.idle")` | `idle` |
+| turn finished | `session.on("session.idle")` | `happy` ("done!") if it was mid-task, else `idle` |
 
-The `pet_control` tool is filtered out of `onPreToolUse`/`onPostToolUse` so the pet doesn't react to its
-own control calls.
+The pet stays `working` across a whole run of tools (only the label changes) — there is **no** per-tool
+success reaction, so it no longer flashes "done!" between every call. `pet_control` is filtered out of
+`onPreToolUse` so the pet doesn't react to its own control calls.
 
 ## Local (Swift-side) mood state machine
 
 The renderer owns transient/auto transitions so the controller only sends discrete events:
 
 - `greet` → `idle` after 1.6s
-- `happy` → `thinking` after 1.3s
-- `worried` → `thinking` after 2.4s
+- `happy` → `idle` after 1.5s
+- `worried` → `idle` after 2.4s
+- `thinking` / `working` → persist until the next event (no auto transition)
 - `idle` → `sleeping` after 18s of no new `seq`
 - any new `seq` → wake + adopt the new mood
 - `mood: "quit"` → `NSApp.terminate`; `mood: "hidden"` → `orderOut`

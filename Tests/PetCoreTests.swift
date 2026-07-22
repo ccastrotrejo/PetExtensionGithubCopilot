@@ -16,8 +16,8 @@ enum PetCoreTests {
     static func main() {
         // MARK: Mood.autoNext — data-driven transitions
         check(Mood.greet.autoNext?.to == .idle && Mood.greet.autoNext?.after == 1.6, "greet → idle after 1.6s")
-        check(Mood.happy.autoNext?.to == .thinking && Mood.happy.autoNext?.after == 1.3, "happy → thinking after 1.3s")
-        check(Mood.worried.autoNext?.to == .thinking && Mood.worried.autoNext?.after == 2.4, "worried → thinking after 2.4s")
+        check(Mood.happy.autoNext?.to == .idle && Mood.happy.autoNext?.after == 1.5, "happy → idle after 1.5s")
+        check(Mood.worried.autoNext?.to == .idle && Mood.worried.autoNext?.after == 2.4, "worried → idle after 2.4s")
         check(Mood.idle.autoNext?.to == .sleeping && Mood.idle.autoNext?.after == 18, "idle → sleeping after 18s")
         check(Mood.thinking.autoNext == nil, "thinking has no auto transition")
         check(Mood.working.autoNext == nil, "working has no auto transition")

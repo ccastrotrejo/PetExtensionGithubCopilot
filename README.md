@@ -11,7 +11,7 @@ reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot exten
 | Starts a session | 🐶 **greets** you 👋 (happy eyes, tail wagging) |
 | Receives a prompt | 🐶 **thinks** 💭 (head tilts) |
 | Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) |
-| Finishes a tool successfully | 🐶 is **happy** ✨ (bounces, tail wags fast) |
+| Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing), then 😴 **sleeps** after ~18s |
 
