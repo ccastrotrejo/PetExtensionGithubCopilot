@@ -31,6 +31,7 @@ enum Mood: String {
 
 enum EyeState { case open, closed, happy, worried }
 enum MouthState { case neutral, smile, pant, open }
+enum Accessory { case wave, think, gear, sparkle, sweat, sleep }
 
 struct DogFeatures {
     var eyes: EyeState = .open
@@ -46,7 +47,7 @@ struct Pose {
     var rot: CGFloat = 0
     var shakeX: CGFloat = 0
     var scaleY: CGFloat = 1
-    var accessory: String? = nil
+    var accessory: Accessory? = nil
     var bubble: String? = nil
     var feat = DogFeatures()
 
@@ -59,27 +60,27 @@ struct Pose {
         case .sleeping:
             p.scaleY = 1 + sin(phase * 2) * 0.03
             p.feat = DogFeatures(eyes: .closed, mouth: .neutral, wag: 0)
-            p.accessory = "💤"
+            p.accessory = .sleep
         case .greet:
             p.bob = abs(sin(phase * 8)) * 10
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 11)
-            p.accessory = "👋"; p.bubble = "hi!"
+            p.accessory = .wave; p.bubble = "hi!"
         case .thinking:
             p.rot = sin(phase * 3) * 0.06
             p.feat = DogFeatures(eyes: .open, mouth: .neutral, wag: 1)
-            p.accessory = "💭"; p.bubble = message.isEmpty ? "thinking…" : message
+            p.accessory = .think; p.bubble = message.isEmpty ? "thinking…" : message
         case .working:
             p.bob = abs(sin(phase * 12)) * 6
             p.feat = DogFeatures(eyes: .open, mouth: .pant, wag: 5)
-            p.accessory = "⚙️"; p.bubble = message.isEmpty ? "working…" : message
+            p.accessory = .gear; p.bubble = message.isEmpty ? "working…" : message
         case .happy:
             p.bob = abs(sin(phase * 10)) * 16
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
-            p.accessory = "✨"; p.bubble = message.isEmpty ? "done!" : message
+            p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
         case .worried:
             p.shakeX = sin(phase * 30) * 4
             p.feat = DogFeatures(eyes: .worried, mouth: .open, wag: 0, tailDown: true)
-            p.accessory = "💦"; p.bubble = message.isEmpty ? "uh oh" : message
+            p.accessory = .sweat; p.bubble = message.isEmpty ? "uh oh" : message
         }
         return p
     }
@@ -202,11 +203,11 @@ final class PetView: NSView {
         drawDachshundPixel(size: petSize, feat: pose.feat, phase: phase)
         ctx.restoreGState()
 
-        // Accessory (near head)
+        // Accessory (pixel-art icon near head)
         if let acc = pose.accessory {
             let accBob = sin(phase * 4) * 3
-            drawEmoji(acc, size: 24, centeredAt: CGPoint(x: cx + petSize * 0.36,
-                                                         y: cy + petSize * 0.30 + accBob))
+            drawAccessory(acc, at: CGPoint(x: cx + petSize * 0.38,
+                                           y: cy + petSize * 0.36 + accBob), phase: phase)
         }
 
         // Speech bubble
@@ -310,11 +311,74 @@ final class PetView: NSView {
         }
     }
 
-    private func drawEmoji(_ s: String, size: CGFloat, centeredAt p: CGPoint) {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: size)]
-        let ns = s as NSString
-        let sz = ns.size(withAttributes: attrs)
-        ns.draw(at: CGPoint(x: p.x - sz.width / 2, y: p.y - sz.height / 2), withAttributes: attrs)
+    // MARK: Pixel-art accessories (drawn in view coords beside the head)
+
+    private static let cGear      = NSColor(white: 0.62, alpha: 1)
+    private static let cGearDark  = NSColor(white: 0.38, alpha: 1)
+    private static let cSpark     = NSColor(red: 1.00, green: 0.83, blue: 0.28, alpha: 1)
+    private static let cSweat     = NSColor(red: 0.33, green: 0.62, blue: 0.95, alpha: 1)
+    private static let cCloud     = NSColor(white: 1.00, alpha: 0.97)
+    private static let cCloudEdge = NSColor(white: 0.72, alpha: 1)
+    private static let cZ         = NSColor(red: 0.22, green: 0.46, blue: 0.86, alpha: 1)
+    private static let cPaw       = NSColor(red: 0.90, green: 0.70, blue: 0.48, alpha: 1)
+
+    private func drawAccessory(_ a: Accessory, at c: CGPoint, phase: Double) {
+        let u: CGFloat = 4                      // accessory pixel size
+        func b(_ gx: CGFloat, _ gy: CGFloat, _ w: CGFloat, _ h: CGFloat, _ color: NSColor) {
+            color.setFill()
+            NSBezierPath(rect: NSRect(x: c.x + gx * u, y: c.y + gy * u,
+                                      width: w * u, height: h * u)).fill()
+        }
+        switch a {
+        case .gear:
+            b(-1.5, -1.5, 3, 3, PetView.cGear)
+            b(-0.5, -0.5, 1, 1, PetView.cGearDark)          // hub
+            if Int(phase * 4) % 2 == 0 {                    // teeth N/S/E/W
+                b(-0.5, 1.5, 1, 1, PetView.cGear); b(-0.5, -2.5, 1, 1, PetView.cGear)
+                b(1.5, -0.5, 1, 1, PetView.cGear); b(-2.5, -0.5, 1, 1, PetView.cGear)
+            } else {                                        // teeth on corners → spins
+                b(1.5, 1.5, 1, 1, PetView.cGear); b(-2.5, 1.5, 1, 1, PetView.cGear)
+                b(1.5, -2.5, 1, 1, PetView.cGear); b(-2.5, -2.5, 1, 1, PetView.cGear)
+            }
+        case .sparkle:
+            let big: CGFloat = sin(phase * 6) > 0 ? 2 : 1.4
+            b(-0.5, -big, 1, big * 2, PetView.cSpark)
+            b(-big, -0.5, big * 2, 1, PetView.cSpark)
+            b(1.8, 1.3, 0.8, 1.6, PetView.cSpark)           // small companion
+            b(1.4, 1.7, 1.6, 0.8, PetView.cSpark)
+        case .sweat:
+            let d = CGFloat(sin(phase * 5)) * 0.3
+            b(-1, -1 + d, 2, 2, PetView.cSweat)             // droplet
+            b(-0.5, 1 + d, 1, 1, PetView.cSweat)            // tip
+            b(1.4, 0.2 - d, 1, 1, PetView.cSweat)           // second bead
+        case .think:
+            let e = PetView.cCloudEdge                       // gray outline → visible on white
+            b(-2.1, -0.1, 4.2, 1.7, e); b(-1.5, 0.9, 2.8, 1.2, e)
+            b(-2.7, 0.1, 1.6, 1.3, e); b(1.1, 0.1, 1.4, 1.3, e)
+            b(-2, 0, 4, 1.5, PetView.cCloud)
+            b(-1.4, 1, 2.6, 1, PetView.cCloud)
+            b(-2.6, 0.2, 1.4, 1.1, PetView.cCloud)
+            b(1.2, 0.2, 1.2, 1.1, PetView.cCloud)
+            b(-2.3, -1.8, 1.1, 1.1, e); b(-2.2, -1.7, 0.9, 0.9, PetView.cCloud)  // trailing puffs
+            b(-3.1, -3.0, 0.9, 0.9, e); b(-3.0, -2.9, 0.7, 0.7, PetView.cCloud)
+        case .sleep:
+            let r = CGFloat(sin(phase * 2)) * 0.4
+            b(-1.6, 1.4 + r, 3, 0.8, PetView.cZ)            // big Z
+            b(0.2, 0.4 + r, 0.9, 0.9, PetView.cZ)
+            b(-0.7, -0.4 + r, 0.9, 0.9, PetView.cZ)
+            b(-1.6, -1.2 + r, 3, 0.8, PetView.cZ)
+            b(1.7, 2.5 + r, 1.6, 0.6, PetView.cZ)           // small z
+            b(2.0, 1.9 + r, 0.6, 0.6, PetView.cZ)
+            b(1.7, 1.4 + r, 1.6, 0.6, PetView.cZ)
+        case .wave:
+            let dx = CGFloat(sin(phase * 7)) * 0.4          // waving paw
+            b(-1.5 + dx, -1.5, 3, 3, PetView.cPaw)          // palm
+            b(-1.5 + dx, 1.4, 0.8, 0.9, PetView.cPaw)       // toes
+            b(-0.4 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
+            b(0.7 + dx, 1.4, 0.8, 0.9, PetView.cPaw)
+            b(-2.4 + dx, -0.3, 0.9, 1.2, PetView.cPaw)      // thumb
+            b(-1.0 + dx, -1.1, 0.7, 0.7, PetView.cShade)    // pad
+        }
     }
 
     private func drawBubble(_ text: String, petCenterX: CGFloat, baseY: CGFloat, maxWidth: CGFloat) {

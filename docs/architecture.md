@@ -143,7 +143,8 @@ origin is persisted to `pet.pos` (next to `state.json`) and restored on launch.
 
 A `Timer` at ~30 fps drives `PetView.tick()`, which polls the state file (~5×/s), runs the mood machine,
 and redraws. The pet is a pixel-art dachshund drawn with Core Graphics as grid-aligned blocks (limited
-palette), plus an accessory emoji, a rounded speech bubble with a tail, and a soft ground shadow.
+palette), plus a pixel-art status icon (gear, sparkle, thought cloud, sweat, Zzz, waving paw), a rounded
+speech bubble with a tail, and a soft ground shadow.
 
 ## Known limitations
 
