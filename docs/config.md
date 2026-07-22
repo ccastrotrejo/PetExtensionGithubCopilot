@@ -32,7 +32,7 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `lookAroundInterval` | number \| `[min, max]` | `[4, 9]` | Seconds between autonomous glances (left / right / at-you). A single number fixes the interval; a pair randomizes within the range. Values below `1` are raised to `1`. |
 | `enabledBehaviors` | string[] | `["lookAround", "bubbles"]` | Which autonomous behaviors are on. Known values: `lookAround` (glancing), `bubbles` (speech bubbles). Unknown entries are ignored; an empty list turns them all off. |
 | `muted` | boolean | `false` | When `true`, suppresses all speech bubbles (a quick "quiet" toggle, independent of `enabledBehaviors`). |
-| `reduceMotion` | boolean | `false` | Accessibility: when `true`, the pet holds still — no bouncing, breathing, blinking, tail wag, or accessory wiggle — while keeping its expression and facing you. |
+| `reduceMotion` | boolean | `false` | Accessibility: when `true`, non-essential motion (whole-body bob/breathing, head tilt/trembling, tail wag and ear-flap amplitude, accessory bob) is damped to ~15% and the gear/sparkle/panting-tongue animations freeze on one frame; look-around stops too. Expressions (eyes, mouth, accessory, speech bubble) are unaffected. Combines with (does not replace) the OS-level Reduce Motion accessibility setting — either one stills the pet. |
 | `breed` | string | `"dachshund"` | **Reserved** for the personalization work. Parsed and stored today, but only the dachshund is drawn. |
 | `palette` | string | `"chestnut"` | **Reserved** for the personalization work. Parsed and stored today; alternate palettes are not yet rendered. |
 

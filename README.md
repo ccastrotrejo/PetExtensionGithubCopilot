@@ -16,6 +16,19 @@ glances around on its own — looking left, right, or straight at you.
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing), then 😴 **sleeps** after ~18s |
 
+## Animation & accessibility
+
+The pet respects **Reduce Motion** (System Settings → Accessibility → Display), or the `reduceMotion`
+override in [`config.json`](docs/config.md) — either one stills it. When active, non-essential
+bobbing/tilting/trembling is damped to ~15% of normal, and binary accessory animation (gear spin,
+sparkle pulse) is frozen outright — expressions (eyes, mouth, accessory, speech bubble) are unaffected
+and stay fully readable.
+
+Redraw cadence is also throttled to save CPU: 30 FPS while actively animating (greet/thinking/
+working/happy/worried), dropping to 5 FPS when calm (idle/sleeping); with Reduce Motion on, 10 FPS
+active / 2 FPS calm. While the window is hidden or occluded (covered by another window / on
+another Space), it ticks at ~5 FPS just to poll state and the heartbeat — no animation, no redraw.
+
 ## Install / activate
 
 This extension lives in `~/.copilot/extensions/copilot-pet/`. It is discovered automatically by the
@@ -69,7 +82,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | `lookAroundInterval` | `[4, 9]` | Seconds between glances (number or `[min, max]`). |
 | `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing / speech bubbles. |
 | `muted` | `false` | Suppress all speech bubbles. |
-| `reduceMotion` | `false` | Hold still (accessibility) while keeping the expression. |
+| `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` / `palette` | `dachshund` / `chestnut` | Reserved for personalization (parsed, not yet rendered). |
 
 Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
@@ -80,10 +93,10 @@ reference: [`docs/config.md`](docs/config.md).
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `PetConfig` (no AppKit). Unit-tested. |
-| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; hot-reloads `config.json`. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig` (no AppKit). Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
 | `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `PetConfig.parse`. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse`. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
