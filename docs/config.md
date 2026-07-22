@@ -28,13 +28,15 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
-| `size` | number | `62` | Pet size in points. Clamped to `32`–`160`; the window grows/shrinks to fit. |
+| `size` | number | `62` | Pet size in points. Clamped to `32`–`160`; the window grows/shrinks to fit. Cells are integer-sized so the sprite stays crisp at any size. |
+| `speed` | number | `1` | Animation speed multiplier. Clamped to `0.5`–`2.0` — lower is calmer, higher is livelier. Scales the whole animation clock (breathing, wag, idle antics). |
 | `lookAroundInterval` | number \| `[min, max]` | `[4, 9]` | Seconds between autonomous glances (left / right / at-you). A single number fixes the interval; a pair randomizes within the range. Values below `1` are raised to `1`. |
 | `enabledBehaviors` | string[] | `["lookAround", "bubbles"]` | Which autonomous behaviors are on. Known values: `lookAround` (glancing **and** watching your cursor), `bubbles` (speech bubbles). Unknown entries are ignored; an empty list turns them all off. |
 | `muted` | boolean | `false` | When `true`, suppresses all speech bubbles (a quick "quiet" toggle, independent of `enabledBehaviors`). |
 | `reduceMotion` | boolean | `false` | Accessibility: when `true`, non-essential motion (whole-body bob/breathing, head tilt/trembling, tail wag and ear-flap amplitude, accessory bob) is damped to ~15% and the gear/sparkle/panting-tongue animations freeze on one frame; look-around and cursor-watching stop too. Expressions (eyes, mouth, accessory, speech bubble) are unaffected. Combines with (does not replace) the OS-level Reduce Motion accessibility setting — either one stills the pet. |
+| `palette` | string | `"chestnut"` | Coat colour scheme. One of `chestnut` (red-and-tan), `black-and-tan`, `red`, or `cream`. Matched case-insensitively; an unknown name falls back to `chestnut`. |
+| `name` | string | `""` | Give the pet a name. Shown subtly: on hover (tooltip) and in its greeting when a session starts ("hi, I'm …!"). Trimmed to 24 characters. |
 | `breed` | string | `"dachshund"` | **Reserved** for the personalization work. Parsed and stored today, but only the dachshund is drawn. |
-| `palette` | string | `"chestnut"` | **Reserved** for the personalization work. Parsed and stored today; alternate palettes are not yet rendered. |
 | `openOnDoubleClick` | string | `""` | What **double-clicking the pet** opens. Empty (default) launches/focuses the **GitHub Copilot host app** that spawned the pet. Set a bundle id (`"com.github.githubapp"`), an app name (`"Copilot"`) or full path (`"/Applications/Copilot.app"`) to target something else, or `"none"`/`"off"` to disable double-click entirely. Single-click-drag still moves the pet regardless. |
 
 ## Examples
@@ -63,6 +65,16 @@ A pet that stays put and never speaks, but still animates:
 ```json
 {
   "enabledBehaviors": []
+}
+```
+
+A personalized companion — a named cream dachshund that moves calmly:
+
+```json
+{
+  "name": "Biscuit",
+  "palette": "cream",
+  "speed": 0.8
 }
 ```
 
