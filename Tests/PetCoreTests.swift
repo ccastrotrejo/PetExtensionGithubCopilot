@@ -104,6 +104,16 @@ enum PetCoreTests {
                                        now: base).map { $0.id } == ["live"],
               "arbitration: liveSessions drops stale heartbeats")
 
+        // Staleness boundary: a heartbeat exactly at the window is still live; one ms older is dead.
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs)],
+                                       now: base).count == 1,
+              "arbitration: heartbeat exactly at staleAfterMs is still live")
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs - 1)],
+                                       now: base).isEmpty,
+              "arbitration: heartbeat one ms past staleAfterMs is dead")
+
         // Most-recent-activity wins between two live sessions.
         let recent = Arbitration.resolve(
             [snap("old", "working", activity: base - 5_000, heartbeat: base, msg: "old"),
