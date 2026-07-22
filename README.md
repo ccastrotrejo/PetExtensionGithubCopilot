@@ -4,6 +4,8 @@ A native macOS desktop companion (inspired by [pets-therapy.com](https://pets-th
 reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot extension** and renders a
 **pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered).
 
+![The pet across its seven moods](assets/preview.png)
+
 | When Copilot… | The pet… |
 | --- | --- |
 | Starts a session | 🐶 **greets** you 👋 (happy eyes, tail wagging) |
@@ -21,7 +23,23 @@ GitHub Copilot app / CLI. After any change, reload it:
 - From the agent: `extensions_reload`
 - Or restart the app, or `/clear` the session.
 
-On first load it compiles `pet.swift` with `swiftc` (a few seconds) into `.bin/pet`, then spawns it.
+On first load it compiles `pet.swift` + `PetCore.swift` with `swiftc` (a few seconds) into `.bin/pet`,
+then spawns it.
+
+## Development
+
+```sh
+# build the pet
+swiftc pet.swift PetCore.swift -o .bin/pet
+
+# run the model unit tests
+swiftc PetCore.swift Tests/PetCoreTests.swift -o /tmp/pettests && /tmp/pettests
+
+# parse-check the extension
+node --check extension.mjs
+```
+
+CI runs all three on every push (`.github/workflows/ci.yml`).
 
 ## Requirements
 
@@ -39,7 +57,9 @@ The extension registers a `pet_control` tool. Ask the agent things like *"hide t
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `pet.swift` | Native AppKit overlay window + pet rendering/animation. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures` (no AppKit). Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext`. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 

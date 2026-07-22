@@ -94,7 +94,7 @@ pet survives reloads.
 
 ## Compilation strategy
 
-`ensureCompiled()` rebuilds only when `pet.swift` is newer than `.bin/pet` (or the binary is missing).
+`ensureCompiled()` rebuilds only when `pet.swift` or `PetCore.swift` is newer than `.bin/pet` (or the binary is missing).
 The extension compiles **without `-O`** (a few seconds) since runtime cost is negligible for a small
 overlay. (`-O` builds took ~44s in testing — too slow for a load-time step.)
 

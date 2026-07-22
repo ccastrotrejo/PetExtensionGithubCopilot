@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the pet (swiftc)
+        run: swiftc pet.swift PetCore.swift -o /tmp/pet
+
+      - name: Run PetCore unit tests
+        run: |
+          swiftc PetCore.swift Tests/PetCoreTests.swift -o /tmp/pettests
+          /tmp/pettests
+
+      - name: Parse-check the extension
+        run: node --check extension.mjs

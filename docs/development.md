@@ -32,8 +32,11 @@ State dir at runtime: `"$TMPDIR/copilot-pet/"` → `state.json`, `pet.pid`, `pet
 
 ```bash
 cd ~/.copilot/extensions/copilot-pet
-swiftc pet.swift -o .bin/pet          # fast, unoptimized (what the extension uses)
-# swiftc -O pet.swift -o .bin/pet     # optimized (~44s; unnecessary here)
+swiftc pet.swift PetCore.swift -o .bin/pet          # fast, unoptimized (what the extension uses)
+# swiftc -O pet.swift PetCore.swift -o .bin/pet     # optimized (~44s; unnecessary here)
+
+# run the model unit tests
+swiftc PetCore.swift Tests/PetCoreTests.swift -o /tmp/pettests && /tmp/pettests
 ```
 
 ## Run the pet standalone (no Copilot)
