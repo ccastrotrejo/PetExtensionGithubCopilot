@@ -185,3 +185,87 @@ struct PetConfig: Equatable {
         return c
     }
 }
+
+// MARK: - Multi-session arbitration
+//
+// One desktop pet is shared by *every* local Copilot session. Each session's
+// controller writes its own state file under `sessions/<id>.json`; the pet reads
+// them all and this pure arbiter decides what the single pet should do. Keeping
+// the logic here (no AppKit) means it is exercised directly by PetCoreTests.
+//
+// Rules:
+//   • Most-recent-activity wins — the session that changed mood last drives the pet.
+//   • Control signals (`hidden` / `quit`) from the winning session act on the one
+//     shared pet, i.e. they are respected globally.
+//   • Greets are de-duped across processes: a greet only plays on the transition
+//     from no live sessions to some, so opening N sessions never means N "hi!"s.
+//   • A session whose controller stopped heart-beating is considered dead and is
+//     ignored (and eventually pruned).
+
+/// A snapshot of one session's state file, as seen by the pet.
+struct SessionSnapshot: Equatable {
+    let id: String
+    let mood: String        // raw wire value; may be a control signal
+    let message: String
+    let activity: Double    // ms since epoch — when this session last changed mood
+    let heartbeat: Double   // ms since epoch — controller liveness
+}
+
+/// What the shared pet should do this tick.
+enum PetCommand: Equatable {
+    case show(Mood, message: String)
+    case hide
+    case quit
+}
+
+/// The arbiter's verdict. `winner`/`activity` form a change key so the renderer
+/// only reacts (resets timers, re-faces) when the driving session actually changes.
+struct Resolution: Equatable {
+    let command: PetCommand
+    let winner: String
+    let activity: Double
+}
+
+enum Arbitration {
+    /// A controller heartbeat older than this (ms) means its session is dead.
+    static let staleAfterMs: Double = 12_000
+
+    /// Sessions still considered alive at `now` (ms since epoch).
+    static func liveSessions(_ sessions: [SessionSnapshot], now: Double) -> [SessionSnapshot] {
+        sessions.filter { now - $0.heartbeat <= staleAfterMs }
+    }
+
+    /// Decide what the shared pet should do.
+    ///
+    /// - Parameters:
+    ///   - sessions: every session state file the pet found.
+    ///   - now: current time in ms since epoch.
+    ///   - hadLiveSessions: whether a live session existed on the previous tick.
+    ///     Used to de-dupe greets — a greet is only honored on the 0→N transition.
+    /// - Returns: `nil` when no session is live (the caller keeps the current pose;
+    ///   the heartbeat watchdog handles termination).
+    static func resolve(_ sessions: [SessionSnapshot], now: Double, hadLiveSessions: Bool) -> Resolution? {
+        let live = liveSessions(sessions, now: now)
+        guard !live.isEmpty else { return nil }
+
+        // Most-recent-activity wins; deterministic id tie-break for stability.
+        let winner = live.max { a, b in
+            a.activity != b.activity ? a.activity < b.activity : a.id < b.id
+        }!
+
+        let command: PetCommand
+        switch winner.mood {
+        case "quit":
+            command = .quit
+        case "hidden":
+            command = .hide
+        default:
+            var mood = Mood(rawValue: winner.mood) ?? .idle
+            // De-dupe greets across processes: a session that boots while others
+            // are already live shows idle instead of a redundant second "hi!".
+            if mood == .greet && hadLiveSessions { mood = .idle }
+            command = .show(mood, message: winner.message)
+        }
+        return Resolution(command: command, winner: winner.id, activity: winner.activity)
+    }
+}

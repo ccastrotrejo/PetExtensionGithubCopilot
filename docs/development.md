@@ -15,7 +15,8 @@ copilot-pet/
     └── development.md    # this file
 ```
 
-State dir at runtime: `"$TMPDIR/copilot-pet/"` → `state.json`, `pet.pid`, `pet.log`.
+State dir at runtime: `"$TMPDIR/copilot-pet/"` → `sessions/<id>.json` (one per session), `pet.pid`,
+`pet.lock`, `pet.pos`, `pet.log`.
 
 ## Edit → reload loop
 
@@ -42,21 +43,22 @@ swiftc PetCore.swift Tests/PetCoreTests.swift -o /tmp/pettests && /tmp/pettests
 ## Run the pet standalone (no Copilot)
 
 ```bash
-SD="$TMPDIR/copilot-pet"; mkdir -p "$SD"
+SD="$TMPDIR/copilot-pet"; mkdir -p "$SD/sessions"
 NOW=$(node -e 'process.stdout.write(String(Date.now()))')
-printf '{"mood":"working","message":"hello","seq":1,"heartbeat":%s}' "$NOW" > "$SD/state.json"
-~/.copilot/extensions/copilot-pet/.bin/pet "$SD/state.json" &
-# change mood live:
+# The pet reads every file in sessions/ and arbitrates. One session file is enough to drive it.
+printf '{"id":"demo","mood":"working","message":"hello","seq":1,"activity":%s,"heartbeat":%s}' "$NOW" "$NOW" > "$SD/sessions/demo.json"
+~/.copilot/extensions/copilot-pet/.bin/pet "$SD/state.json" &   # arg only anchors the state dir; the pet scans sessions/
+# change mood live (bump activity so it wins / counts as a new event):
 NOW=$(node -e 'process.stdout.write(String(Date.now()))')
-printf '{"mood":"happy","message":"yay","seq":2,"heartbeat":%s}' "$NOW" > "$SD/state.json"
-# dismiss it (seq must increase):
+printf '{"id":"demo","mood":"happy","message":"yay","seq":2,"activity":%s,"heartbeat":%s}' "$NOW" "$NOW" > "$SD/sessions/demo.json"
+# dismiss it:
 NOW=$(node -e 'process.stdout.write(String(Date.now()))')
-printf '{"mood":"quit","message":"","seq":3,"heartbeat":%s}' "$NOW" > "$SD/state.json"
+printf '{"id":"demo","mood":"quit","message":"","seq":3,"activity":%s,"heartbeat":%s}' "$NOW" "$NOW" > "$SD/sessions/demo.json"
 ```
 
 Two ways to stop a standalone pet:
-- Send `mood: "quit"` with a higher `seq`.
-- Stop refreshing `heartbeat` — the watchdog terminates it within ~12s.
+- Send `mood: "quit"` with a newer `activity`.
+- Stop refreshing `heartbeat` — the watchdog terminates it within ~12s once every session is stale.
 
 > This environment blocks `kill <pid>` with a variable PID. Prefer `mood: "quit"` or the heartbeat
 > watchdog over `kill`. Use `ps -p <pid>` to check liveness.
@@ -65,7 +67,7 @@ Two ways to stop a standalone pet:
 
 ```bash
 SD="$TMPDIR/copilot-pet"
-cat "$SD/state.json"                              # current mood + heartbeat
+cat "$SD"/sessions/*.json                         # each session's current mood + heartbeat
 ps -p "$(cat "$SD/pet.pid")" -o pid=,stat=,command=   # is the pet alive?
 cat "$SD/pet.log"                                 # pet output/errors
 ```
@@ -99,7 +101,7 @@ Extension logs (controller side):
 | Map different events to moods | `extension.mjs` → `hooks` / `session.on(...)` |
 | Pet size / ground position | `pet.swift` → `petSize`, `groundY` |
 | Pixel-art shape / colours | `pet.swift` → `drawDachshundPixel` + palette constants |
-| Reposition the pet | drag its body; position persists in `pet.pos` next to `state.json` |
+| Reposition the pet | drag its body; position persists in `pet.pos` in the state dir |
 
 ## Troubleshooting
 

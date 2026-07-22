@@ -14,11 +14,13 @@ import Cocoa
 
 final class PetState {
     var statePath: String
-    var lastSeq: Int = -1
+    var sessionsDir: String            // dir of per-session state files to arbitrate
+    var lastKey: String = ""           // winner id + activity of the applied resolution
     var mood: Mood = .greet
     var message: String = ""
     var moodChangeTime: TimeInterval = Date().timeIntervalSince1970
-    var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0
+    var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0  // freshest controller
+    var hadLiveSessions: Bool = false  // was any session live on the previous tick?
     var phase: Double = 0
     var lastPoll: TimeInterval = 0
     var facing: Facing = .front       // greet by looking at you
@@ -27,7 +29,10 @@ final class PetState {
     var configPath: String = ""
     var configMTime: Double = -1      // last-seen config.json mtime; -1 = absent
 
-    init(statePath: String) { self.statePath = statePath }
+    init(statePath: String) {
+        self.statePath = statePath
+        self.sessionsDir = (statePath as NSString).deletingLastPathComponent + "/sessions"
+    }
 }
 
 // MARK: - Pet view
@@ -87,29 +92,70 @@ final class PetView: NSView {
     }
 
     private func loadState() {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: state.statePath)),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        let now = Date().timeIntervalSince1970
+        let nowMs = now * 1000.0
+        let sessions = readSessions()
 
-        if let hb = obj["heartbeat"] as? Double { state.heartbeat = hb }
-        let seq = (obj["seq"] as? Int) ?? Int((obj["seq"] as? Double) ?? -1)
-        guard seq != state.lastSeq else { return }
-        state.lastSeq = seq
+        // The freshest controller heartbeat drives the shared watchdog: the pet
+        // only self-terminates once *every* session has gone stale (checked in tick).
+        if let freshest = sessions.map({ $0.heartbeat }).max() {
+            state.heartbeat = freshest
+        }
 
-        let raw = (obj["mood"] as? String) ?? "idle"
-        if raw == "quit" { NSApp.terminate(nil); return }
-        if let win = self.window {
-            if raw == "hidden" { win.orderOut(nil) }
-            else if !win.isVisible { win.orderFrontRegardless() }
+        let resolution = Arbitration.resolve(sessions, now: nowMs, hadLiveSessions: state.hadLiveSessions)
+        state.hadLiveSessions = !Arbitration.liveSessions(sessions, now: nowMs).isEmpty
+
+        guard let res = resolution else { return }  // no live session → keep current pose
+
+        if case .quit = res.command { NSApp.terminate(nil); return }
+
+        // React only when the driving session/event changes, so a session that
+        // keeps re-writing the same mood doesn't reset local timers every poll.
+        let key = "\(res.winner)#\(res.activity)"
+        guard key != state.lastKey else { return }
+        state.lastKey = key
+
+        switch res.command {
+        case .quit:
+            return  // handled above
+        case .hide:
+            self.window?.orderOut(nil)
+        case .show(let mood, let message):
+            if let win = self.window, !win.isVisible { win.orderFrontRegardless() }
+            state.mood = mood
+            state.message = message
+            state.moodChangeTime = now
+            // On a fresh greeting, turn to face you for a moment.
+            if state.mood == .greet {
+                state.facing = .front
+                state.nextTurn = now + 3
+            }
         }
-        if raw != "hidden" { state.mood = Mood(rawValue: raw) ?? .idle }
-        state.message = (obj["message"] as? String) ?? ""
-        state.moodChangeTime = Date().timeIntervalSince1970
-        // On a fresh greeting, turn to face you for a moment.
-        if state.mood == .greet {
-            state.facing = .front
-            state.nextTurn = Date().timeIntervalSince1970 + 3
+    }
+
+    /// Read and parse every `*.json` session file, pruning long-dead ones so the
+    /// directory doesn't grow without bound.
+    private func readSessions() -> [SessionSnapshot] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: state.sessionsDir) else { return [] }
+        let nowMs = Date().timeIntervalSince1970 * 1000.0
+        var out: [SessionSnapshot] = []
+        for name in names where name.hasSuffix(".json") {
+            let full = state.sessionsDir + "/" + name
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: full)),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let heartbeat = (obj["heartbeat"] as? Double) ?? 0
+            // Well past the stale window: the controller is gone for good — clean up.
+            if nowMs - heartbeat > 60_000 { try? fm.removeItem(atPath: full); continue }
+            let id = (obj["id"] as? String) ?? (name as NSString).deletingPathExtension
+            let mood = (obj["mood"] as? String) ?? "idle"
+            let message = (obj["message"] as? String) ?? ""
+            let activity = (obj["activity"] as? Double) ?? (obj["ts"] as? Double) ?? 0
+            out.append(SessionSnapshot(id: id, mood: mood, message: message,
+                                       activity: activity, heartbeat: heartbeat))
         }
+        return out
     }
 
     // Poll config.json for changes (hot-reload). Cheap: only re-parses when the

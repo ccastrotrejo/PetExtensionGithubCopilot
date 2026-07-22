@@ -1,21 +1,58 @@
 # State File Protocol
 
-Authoritative reference for the JSON file that `extension.mjs` writes and `pet.swift` polls. This file,
+Authoritative reference for the JSON files that `extension.mjs` writes and `pet.swift` polls. These files,
 `extension.mjs`'s `MOODS` manifest, and the Swift `Mood` enum must stay in sync.
 
-## `state.json` schema
+## One pet, many sessions
+
+Every local Copilot session runs its own `extension.mjs` (a *controller*), but there is only **one** desktop
+pet. To stop concurrent sessions from stomping a single shared file, **each controller writes its own state
+file** under `sessions/`:
+
+```
+$TMPDIR/copilot-pet/
+  sessions/
+    <sessionId>.json   ← one per controller process (uuid)
+  pet.pid  pet.lock  pet.pos  pet.log
+```
+
+The pet reads **all** files in `sessions/`, ignores any whose controller has stopped heart-beating, and runs
+the pure arbiter in `PetCore.swift` (`Arbitration.resolve`) to decide what the single pet should do. See
+[Arbitration](#arbitration).
+
+## Per-session file schema
 
 ```json
-{ "mood": "working", "message": "editing code", "seq": 42, "ts": 1699999999999, "heartbeat": 1699999999999 }
+{ "id": "b1f2…", "mood": "working", "message": "editing code", "seq": 42,
+  "ts": 1699999999999, "activity": 1699999999900, "heartbeat": 1699999999999 }
 ```
 
 | Field | Type | Meaning | Units |
 | --- | --- | --- | --- |
+| `id` | string | Stable id of the writing controller (one per process). | — |
 | `mood` | string | Current display mood or control signal. Unknown display values fall back to `idle` in Swift. | — |
 | `message` | string | Optional speech-bubble text, truncated by the controller before writing. | — |
-| `seq` | number | Monotonic counter; a changed value means “new mood/message to react to.” | count |
-| `ts` | number | Last state write timestamp, mostly useful for debugging. | ms since Unix epoch |
-| `heartbeat` | number | Controller liveness timestamp. The Swift pet terminates when it goes stale, driving the ~12s watchdog. | ms since Unix epoch |
+| `seq` | number | Monotonic counter, per controller; retained for debugging. | count |
+| `ts` | number | Last state write timestamp (any write, incl. heartbeat). | ms since Unix epoch |
+| `activity` | number | Timestamp of the last **mood change** (not heartbeat refresh). Drives most-recent-activity arbitration. | ms since Unix epoch |
+| `heartbeat` | number | Controller liveness timestamp. A session goes stale after ~12s; the pet exits once **all** sessions are stale. | ms since Unix epoch |
+
+## Arbitration
+
+`Arbitration.resolve(sessions, now, hadLiveSessions)` in `PetCore.swift` is pure and unit-tested. Given every
+session snapshot it decides the shared pet's command:
+
+1. **Liveness** — a session is *live* only while `now - heartbeat ≤ 12s`. Stale sessions are ignored (and
+   pruned from disk after 60s).
+2. **Most-recent-activity wins** — among live sessions, the one with the greatest `activity` drives the pet
+   (ties broken deterministically by `id`).
+3. **Control signals are global** — if the winner's `mood` is `quit` the pet terminates; if `hidden` the pet's
+   window is ordered out. They act on the one shared pet, i.e. respected globally.
+4. **Greet de-dup** — a `greet` is only honored on the transition from *no* live sessions to some. A session
+   that boots while others are already live shows `idle` instead of a redundant second "hi!".
+
+The pet reacts to a change only when the winning `(id, activity)` pair changes, so a session repeatedly writing
+the same mood never resets local animation timers.
 
 ## Mood vocabulary
 
@@ -41,12 +78,14 @@ Control signals are protocol commands, not display moods:
 
 ## Write mechanics
 
-`extension.mjs` writes state atomically: it serializes the payload to `state.json.tmp`, then renames that
-file over `state.json`. This keeps the Swift poller from seeing partial JSON.
+Each controller writes its own file atomically: it serializes the payload to `sessions/<id>.json.tmp`, then
+renames that over `sessions/<id>.json`. This keeps the Swift poller from seeing partial JSON.
 
-Every mood change increments `seq` before writing. Heartbeat refreshes rewrite the file with the same `seq`,
-so the pet knows the controller is alive without treating the refresh as a new mood. The controller refreshes
-`heartbeat` every 5s; if the Swift side observes it stale for roughly 12s, the pet exits.
+Every mood change increments `seq` and updates `activity` before writing. Heartbeat refreshes rewrite the file
+with the same `seq`/`activity`, so a session stays *live* without winning arbitration over a more recently
+active one. The controller refreshes `heartbeat` every 5s; the pet exits once **every** session's heartbeat is
+stale for roughly 12s. Controllers also delete their own file on graceful exit; the pet prunes files whose
+controller has been gone for 60s.
 
 ## Keeping the seam aligned
 

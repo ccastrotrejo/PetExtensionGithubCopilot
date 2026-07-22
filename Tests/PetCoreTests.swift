@@ -125,6 +125,88 @@ enum PetCoreTests {
         check(calmThinking.accessory == .think && calmThinking.bubble == "thinking…",
               "reduceMotion: keeps thinking accessory + bubble")
 
+        // MARK: Arbitration — multi-session, one shared pet
+        let base = 1_000_000.0  // arbitrary "now" in ms
+        func snap(_ id: String, _ mood: String, activity: Double, heartbeat: Double = 0, msg: String = "") -> SessionSnapshot {
+            SessionSnapshot(id: id, mood: mood, message: msg, activity: activity, heartbeat: heartbeat)
+        }
+
+        // No sessions → nothing to show (caller keeps current pose).
+        check(Arbitration.resolve([], now: base, hadLiveSessions: false) == nil, "arbitration: empty → nil")
+
+        // A single live session drives the pet with its mood + message.
+        let single = Arbitration.resolve(
+            [snap("a", "working", activity: base, heartbeat: base, msg: "npm test")],
+            now: base, hadLiveSessions: true)
+        check(single?.command == .show(.working, message: "npm test") && single?.winner == "a",
+              "arbitration: single live session shows its mood")
+
+        // A session whose heartbeat is stale is ignored entirely.
+        check(Arbitration.resolve([snap("dead", "working", activity: base, heartbeat: base - 20_000)],
+                                  now: base, hadLiveSessions: true) == nil,
+              "arbitration: stale session excluded → nil")
+        check(Arbitration.liveSessions([snap("live", "idle", activity: base, heartbeat: base),
+                                        snap("dead", "idle", activity: base, heartbeat: base - 13_000)],
+                                       now: base).map { $0.id } == ["live"],
+              "arbitration: liveSessions drops stale heartbeats")
+
+        // Staleness boundary: a heartbeat exactly at the window is still live; one ms older is dead.
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs)],
+                                       now: base).count == 1,
+              "arbitration: heartbeat exactly at staleAfterMs is still live")
+        check(Arbitration.liveSessions([snap("edge", "idle", activity: base,
+                                             heartbeat: base - Arbitration.staleAfterMs - 1)],
+                                       now: base).isEmpty,
+              "arbitration: heartbeat one ms past staleAfterMs is dead")
+
+        // Most-recent-activity wins between two live sessions.
+        let recent = Arbitration.resolve(
+            [snap("old", "working", activity: base - 5_000, heartbeat: base, msg: "old"),
+             snap("new", "thinking", activity: base, heartbeat: base, msg: "new")],
+            now: base, hadLiveSessions: true)
+        check(recent?.command == .show(.thinking, message: "new") && recent?.winner == "new",
+              "arbitration: most-recent-activity wins")
+
+        // Control signals from the winner are honored globally.
+        check(Arbitration.resolve([snap("a", "quit", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .quit,
+              "arbitration: winner 'quit' → quit")
+        check(Arbitration.resolve([snap("a", "hidden", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .hide,
+              "arbitration: winner 'hidden' → hide")
+        // A quit/hide from a *stale* newer entry doesn't win; the live one does.
+        let liveOverStaleQuit = Arbitration.resolve(
+            [snap("a", "working", activity: base - 1_000, heartbeat: base, msg: "go"),
+             snap("z", "quit", activity: base, heartbeat: base - 20_000)],
+            now: base, hadLiveSessions: true)
+        check(liveOverStaleQuit?.command == .show(.working, message: "go"),
+              "arbitration: stale 'quit' is ignored, live worker wins")
+
+        // Greet de-dup: honored on 0→N, downgraded to idle once sessions are live.
+        check(Arbitration.resolve([snap("first", "greet", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: false)?.command == .show(.greet, message: ""),
+              "arbitration: greet honored on first live session")
+        check(Arbitration.resolve([snap("nth", "greet", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .show(.idle, message: ""),
+              "arbitration: greet de-duped once sessions are already live")
+
+        // Unknown moods fall back to idle.
+        check(Arbitration.resolve([snap("a", "bogus", activity: base, heartbeat: base)],
+                                  now: base, hadLiveSessions: true)?.command == .show(.idle, message: ""),
+              "arbitration: unknown mood → idle")
+
+        // Tie on activity is broken deterministically (by id) — winner is stable.
+        let tieA = Arbitration.resolve(
+            [snap("a", "working", activity: base, heartbeat: base),
+             snap("b", "thinking", activity: base, heartbeat: base)],
+            now: base, hadLiveSessions: true)
+        let tieB = Arbitration.resolve(
+            [snap("b", "thinking", activity: base, heartbeat: base),
+             snap("a", "working", activity: base, heartbeat: base)],
+            now: base, hadLiveSessions: true)
+        check(tieA == tieB && tieA?.winner == "b", "arbitration: activity tie broken deterministically by id")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }
