@@ -59,6 +59,13 @@ final class PetView: NSView {
     private var windowAnchor: NSPoint = .zero  // window origin at mouseDown
     private var pressTravel: CGFloat = 0       // greatest pointer travel seen this press
     private var isDraggingWindow = false
+    // A single click's pet reaction is deferred briefly so a double-click (→ open
+    // the host app) can cancel it — otherwise the first click of a double would
+    // also pet. Cleared once it fires or is cancelled.
+    private var petWork: DispatchWorkItem?
+    // Set when a press opened the host app (double-click), so that press's own
+    // trailing mouseUp doesn't schedule a pet on top of it.
+    private var pressOpenedApp = false
 
     init(frame: NSRect, state: PetState) {
         self.state = state
@@ -79,23 +86,39 @@ final class PetView: NSView {
         return petBBox().contains(point) ? self : nil
     }
 
-    // MARK: Interaction — drag to reposition, click to pet
+    // MARK: Mouse — click to pet, drag to reposition, double-click to open the host app.
     //
-    // The window is *not* `isMovableByWindowBackground`; we handle the press
-    // ourselves so a click and a drag can be told apart (Interaction). A press
-    // that never travels past the drag threshold is a pet (the `loved`
-    // reaction); once it travels further it becomes a window drag instead, so
-    // repositioning the pet never accidentally pets it.
+    // We take full control of the mouse (rather than the window's
+    // `isMovableByWindowBackground`) so the three gestures can be told apart and
+    // a double-click is *reliably* delivered to this view. `mouseDownCanMoveWindow
+    // = false` keeps the window from moving itself; we move it by hand in
+    // `mouseDragged`.
+    //   • click (press that never travels past Interaction.dragThreshold) → pet
+    //     the dog (the `loved` reaction), deferred slightly so a double-click can
+    //     cancel it;
+    //   • drag (travels further) → reposition the window; never pets;
+    //   • double-click → open/focus the host app (openHostApp).
+    override var mouseDownCanMoveWindow: Bool { false }
 
     // Let the very first click land on the pet even when the app is in the
     // background (it's an accessory app that never becomes key on its own).
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// Default host: the GitHub Copilot app that spawns the pet.
+    private static let defaultHostBundleId = "com.github.githubapp"
+
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount >= 2 {
+            petWork?.cancel(); petWork = nil   // the second click: cancel the pending pet
+            pressOpenedApp = true              // …and don't let this press's mouseUp re-pet
+            openHostApp()
+            return
+        }
         pressAnchor = NSEvent.mouseLocation
         windowAnchor = window?.frame.origin ?? .zero
         pressTravel = 0
         isDraggingWindow = false
+        pressOpenedApp = false
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -111,7 +134,15 @@ final class PetView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if Interaction.isClick(maxDisplacement: pressTravel) { petReaction() }
+        // The trailing up of a double-click already opened the app — don't re-pet.
+        if pressOpenedApp { pressOpenedApp = false; return }
+        guard Interaction.isClick(maxDisplacement: pressTravel) else { return }
+        // Defer the pet by the system double-click interval so a double-click
+        // (→ open the host app) cancels it in mouseDown rather than also petting.
+        petWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.petWork = nil; self?.petReaction() }
+        petWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
     }
 
     /// Play the local "petting" reaction: a brief delighted wriggle facing you.
@@ -125,6 +156,48 @@ final class PetView: NSView {
         state.gaze = .none
         state.antic = nil; state.nextAntic = 0
         needsDisplay = true
+    }
+
+    /// Launch or focus the app configured by `openOnDoubleClick` (default: the
+    /// GitHub Copilot host app). Launches it if it isn't running, otherwise
+    /// brings it to the front.
+    private func openHostApp() {
+        switch state.config.doubleClickAction {
+        case .disabled:
+            return
+        case .openDefaultHost:
+            activateApp(bundleId: Self.defaultHostBundleId)
+        case .openBundleId(let id):
+            activateApp(bundleId: id)
+        case .openApp(let nameOrPath):
+            activateApp(nameOrPath: nameOrPath)
+        }
+    }
+
+    private func activateApp(bundleId: String) {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else { return }
+        activate(url: url)
+    }
+
+    private func activateApp(nameOrPath: String) {
+        let url: URL?
+        if nameOrPath.hasSuffix(".app") || nameOrPath.contains("/") {
+            url = URL(fileURLWithPath: nameOrPath)
+        } else {
+            // Bare app name: look in the standard Applications directories.
+            let name = nameOrPath.hasSuffix(".app") ? nameOrPath : "\(nameOrPath).app"
+            let dirs = FileManager.default.urls(for: .applicationDirectory, in: [.localDomainMask, .userDomainMask])
+            url = dirs.map { $0.appendingPathComponent(name) }
+                      .first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        guard let appURL = url, FileManager.default.fileExists(atPath: appURL.path) else { return }
+        activate(url: appURL)
+    }
+
+    private func activate(url: URL) {
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: cfg, completionHandler: nil)
     }
 
     // MARK: Cadence — Reduce Motion + visibility
@@ -866,9 +939,10 @@ enum PetApp {
         window.hasShadow = false
         window.level = .floating
         window.ignoresMouseEvents = false
-        // Drag + click are handled by PetView (see mouseDown/Dragged/Up) so a
-        // click can pet the dog and a drag can reposition it — the window's own
-        // background-drag would swallow that distinction, so it's left off.
+        // Drag, click-to-pet, and double-click-to-open are all handled by PetView
+        // (see its Mouse section); the window's own background-drag would swallow
+        // those distinctions, so it's left off and PetView moves the window itself.
+        window.isMovableByWindowBackground = false
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
 
         let view = PetView(frame: CGRect(origin: .zero, size: winSize), state: state)

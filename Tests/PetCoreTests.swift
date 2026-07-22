@@ -176,6 +176,25 @@ enum PetCoreTests {
         check(PetConfig.parse(["breed": "corgi"]).breed == "corgi", "config: breed parsed (reserved)")
         check(PetConfig.parse(["palette": "gray"]).palette == "gray", "config: palette parsed (reserved)")
 
+        // openOnDoubleClick: default targets the host app; strings resolve to an action.
+        check(defaults.doubleClickAction == .openDefaultHost, "config: double-click defaults to host app")
+        check(PetConfig.parse(["openOnDoubleClick": ""]).doubleClickAction == .openDefaultHost,
+              "config: empty double-click == host app")
+        check(PetConfig.parse(["openOnDoubleClick": "none"]).doubleClickAction == .disabled,
+              "config: 'none' disables double-click")
+        check(PetConfig.parse(["openOnDoubleClick": "OFF"]).doubleClickAction == .disabled,
+              "config: 'off' disables double-click (case-insensitive)")
+        check(PetConfig.parse(["openOnDoubleClick": "com.github.githubapp"]).doubleClickAction
+              == .openBundleId("com.github.githubapp"), "config: reverse-DNS parsed as bundle id")
+        check(PetConfig.parse(["openOnDoubleClick": "/Applications/Copilot.app"]).doubleClickAction
+              == .openApp("/Applications/Copilot.app"), "config: path parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": "Visual Studio Code.app"]).doubleClickAction
+              == .openApp("Visual Studio Code.app"), "config: .app name parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": "Copilot"]).doubleClickAction
+              == .openApp("Copilot"), "config: bare name parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": 42]).openOnDoubleClick == "",
+              "config: bad double-click type falls back to default")
+
         // Wrong types fall back to defaults rather than crashing.
         check(PetConfig.parse(["size": "big"]).size == 62, "config: bad type falls back to default")
 
@@ -354,6 +373,72 @@ enum PetCoreTests {
              snap("a", "working", activity: base, heartbeat: base)],
             now: base, hadLiveSessions: true)
         check(tieA == tieB && tieA?.winner == "b", "arbitration: activity tie broken deterministically by id")
+
+        // MARK: - Behavior composition (issue #6) — pipeline reproduces moods and extends cleanly
+
+        func bctx(_ mood: Mood, phase: Double = 0.4, message: String = "", rm: Bool = false,
+                  antic: Antic? = nil, anticPhase: Double = 0) -> BehaviorContext {
+            BehaviorContext(mood: mood, phase: phase, message: message, reduceMotion: rm,
+                            motionScale: rm ? Pose.reducedMotionScale : 1,
+                            antic: antic, anticPhase: anticPhase)
+        }
+        func samePose(_ a: Pose, _ b: Pose) -> Bool {
+            a.bob == b.bob && a.scaleX == b.scaleX && a.scaleY == b.scaleY && a.headTilt == b.headTilt
+                && a.headBob == b.headBob && a.tremble == b.tremble && a.motionScale == b.motionScale
+                && a.accessory == b.accessory && a.bubble == b.bubble
+                && a.feat.eyes == b.feat.eyes && a.feat.mouth == b.feat.mouth
+                && a.feat.wag == b.feat.wag && a.feat.tailDown == b.feat.tailDown
+        }
+
+        // #1 No visual regression: the default pipeline reproduces Pose.make for
+        // every mood — at rest and mid-animation, with/without Reduce Motion.
+        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried] {
+            for ph in [0.0, 0.4, 1.0] {
+                for rm in [false, true] {
+                    let viaMake = Pose.make(for: mood, phase: ph, message: "hi", reduceMotion: rm)
+                    let viaPipe = PetBehaviors.render(bctx(mood, phase: ph, message: "hi", rm: rm))
+                    check(samePose(viaMake, viaPipe), "behavior: pipeline reproduces \(mood) (phase \(ph), rm \(rm))")
+                }
+            }
+        }
+        // The idle antic overlay is reproduced through the pipeline too.
+        check(samePose(Pose.make(for: .idle, phase: 0.85, message: "", antic: .stretch, anticPhase: 0.9),
+                       PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9))),
+              "behavior: pipeline reproduces the idle antic overlay")
+
+        // The default pipeline is exactly [MoodExpression, IdleAnticLayer].
+        check(PetBehaviors.pipeline.count == 2, "behavior: default pipeline has two behaviors")
+
+        // #2 Extensibility: a brand-new behavior contributes to the frame without
+        // any change to MoodExpression, IdleAnticLayer, or the renderer.
+        struct TestBehavior: Behavior {
+            func apply(to p: inout Pose, _ ctx: BehaviorContext) { p.bubble = "★"; p.scaleX += 0.5 }
+        }
+        let extended = PetBehaviors.render(bctx(.working, message: "npm test"),
+                                           through: PetBehaviors.pipeline + [TestBehavior()])
+        check(extended.bubble == "★", "behavior: appended behavior overrides the bubble")
+        check(extended.accessory == .gear, "behavior: appended behavior leaves the mood expression intact")
+        check(extended.scaleX == 1.5, "behavior: appended behavior contributes on top of the pose")
+
+        // Composition is ordered: the antic only overlays when IdleAnticLayer runs
+        // after the mood expression.
+        check(PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9),
+                                  through: [MoodExpression()]).scaleX == 1,
+              "behavior: without IdleAnticLayer, the antic is not applied")
+        check(PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9),
+                                  through: [MoodExpression(), IdleAnticLayer()]).scaleX > 1,
+              "behavior: IdleAnticLayer overlays the antic after the expression")
+
+        // IdleAnticLayer keeps its gates: real moods and Reduce Motion suppress antics.
+        check(PetBehaviors.render(bctx(.working, phase: 0.85, antic: .stretch, anticPhase: 0.9)).scaleX == 1,
+              "behavior: a real mood ignores the idle antic layer")
+        check(PetBehaviors.render(bctx(.idle, phase: 0.85, rm: true, antic: .stretch, anticPhase: 0.9)).scaleX == 1,
+              "behavior: Reduce Motion suppresses the idle antic layer")
+
+        // motionScale is seeded before behaviors run, so damping is uniform.
+        check(PetBehaviors.render(bctx(.idle, rm: true)).motionScale == Pose.reducedMotionScale,
+              "behavior: render seeds motionScale for Reduce Motion")
+        check(PetBehaviors.render(bctx(.idle)).motionScale == 1, "behavior: render seeds motionScale = 1 normally")
 
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
