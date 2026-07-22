@@ -2,7 +2,8 @@
 
 A native macOS desktop companion (inspired by [pets-therapy.com](https://pets-therapy.com/)) that
 reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot extension** and renders a
-**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered). It
+**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered).
+**Double-click it** to jump to the GitHub Copilot app (configurable — see `openOnDoubleClick`). It
 glances around on its own — looking left, right, or straight at you.
 
 ![The pet across its seven moods](assets/preview.png)
@@ -84,6 +85,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | `muted` | `false` | Suppress all speech bubbles. |
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` / `palette` | `dachshund` / `chestnut` | Reserved for personalization (parsed, not yet rendered). |
+| `openOnDoubleClick` | `""` | What double-clicking the pet opens. Empty = the GitHub Copilot app; or a bundle id / app name / path, or `"none"` to disable. |
 
 Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
 reference: [`docs/config.md`](docs/config.md).

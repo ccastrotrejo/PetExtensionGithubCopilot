@@ -377,9 +377,27 @@ struct PetConfig: Equatable {
     var reduceMotion: Bool = false
     var breed: String = "dachshund"      // reserved for the personalization issue
     var palette: String = "chestnut"     // reserved for the personalization issue
+    /// What a double-click on the pet opens. Empty = the default host app
+    /// (the GitHub Copilot app that spawned the pet); a bundle id, an app
+    /// name/path, or "none"/"off" to disable. See `doubleClickAction`.
+    var openOnDoubleClick: String = ""
 
     /// Behaviors the pet understands today. Unknown entries in the file are ignored.
     static let knownBehaviors: Set<String> = ["lookAround", "bubbles"]
+
+    /// Resolved meaning of `openOnDoubleClick`, kept pure (no AppKit) so it can
+    /// be unit-tested; the view just switches on it to drive `NSWorkspace`.
+    var doubleClickAction: DoubleClickAction {
+        let raw = openOnDoubleClick.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.isEmpty { return .openDefaultHost }
+        if ["none", "off", "disabled", "false"].contains(raw.lowercased()) { return .disabled }
+        // A path or an app bundle: open by file URL.
+        if raw.hasSuffix(".app") || raw.contains("/") { return .openApp(raw) }
+        // Reverse-DNS with no spaces looks like a bundle identifier.
+        if raw.contains(".") && !raw.contains(" ") { return .openBundleId(raw) }
+        // Otherwise treat it as an application name, e.g. "Copilot".
+        return .openApp(raw)
+    }
 
     /// Seconds between autonomous glances (left / right / at-you).
     var lookAroundInterval: ClosedRange<Double> { lookAroundMin...lookAroundMax }
@@ -416,8 +434,19 @@ struct PetConfig: Equatable {
         if let b = obj["reduceMotion"] as? Bool { c.reduceMotion = b }
         if let s = obj["breed"] as? String, !s.isEmpty { c.breed = s }
         if let s = obj["palette"] as? String, !s.isEmpty { c.palette = s }
+        if let s = obj["openOnDoubleClick"] as? String { c.openOnDoubleClick = s }
         return c
     }
+}
+
+/// What a double-click on the pet should do (pure; the AppKit view maps this
+/// onto `NSWorkspace`). `.openDefaultHost` targets the GitHub Copilot app that
+/// spawned the pet.
+enum DoubleClickAction: Equatable {
+    case disabled
+    case openDefaultHost
+    case openBundleId(String)   // e.g. "com.github.githubapp"
+    case openApp(String)        // an app name ("Copilot") or a path ("/Applications/Foo.app")
 }
 
 // MARK: - Multi-session arbitration

@@ -35,6 +35,7 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `reduceMotion` | boolean | `false` | Accessibility: when `true`, non-essential motion (whole-body bob/breathing, head tilt/trembling, tail wag and ear-flap amplitude, accessory bob) is damped to ~15% and the gear/sparkle/panting-tongue animations freeze on one frame; look-around stops too. Expressions (eyes, mouth, accessory, speech bubble) are unaffected. Combines with (does not replace) the OS-level Reduce Motion accessibility setting — either one stills the pet. |
 | `breed` | string | `"dachshund"` | **Reserved** for the personalization work. Parsed and stored today, but only the dachshund is drawn. |
 | `palette` | string | `"chestnut"` | **Reserved** for the personalization work. Parsed and stored today; alternate palettes are not yet rendered. |
+| `openOnDoubleClick` | string | `""` | What **double-clicking the pet** opens. Empty (default) launches/focuses the **GitHub Copilot host app** that spawned the pet. Set a bundle id (`"com.github.githubapp"`), an app name (`"Copilot"`) or full path (`"/Applications/Copilot.app"`) to target something else, or `"none"`/`"off"` to disable double-click entirely. Single-click-drag still moves the pet regardless. |
 
 ## Examples
 

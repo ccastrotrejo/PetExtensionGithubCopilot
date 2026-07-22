@@ -165,6 +165,25 @@ enum PetCoreTests {
         check(PetConfig.parse(["breed": "corgi"]).breed == "corgi", "config: breed parsed (reserved)")
         check(PetConfig.parse(["palette": "gray"]).palette == "gray", "config: palette parsed (reserved)")
 
+        // openOnDoubleClick: default targets the host app; strings resolve to an action.
+        check(defaults.doubleClickAction == .openDefaultHost, "config: double-click defaults to host app")
+        check(PetConfig.parse(["openOnDoubleClick": ""]).doubleClickAction == .openDefaultHost,
+              "config: empty double-click == host app")
+        check(PetConfig.parse(["openOnDoubleClick": "none"]).doubleClickAction == .disabled,
+              "config: 'none' disables double-click")
+        check(PetConfig.parse(["openOnDoubleClick": "OFF"]).doubleClickAction == .disabled,
+              "config: 'off' disables double-click (case-insensitive)")
+        check(PetConfig.parse(["openOnDoubleClick": "com.github.githubapp"]).doubleClickAction
+              == .openBundleId("com.github.githubapp"), "config: reverse-DNS parsed as bundle id")
+        check(PetConfig.parse(["openOnDoubleClick": "/Applications/Copilot.app"]).doubleClickAction
+              == .openApp("/Applications/Copilot.app"), "config: path parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": "Visual Studio Code.app"]).doubleClickAction
+              == .openApp("Visual Studio Code.app"), "config: .app name parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": "Copilot"]).doubleClickAction
+              == .openApp("Copilot"), "config: bare name parsed as app")
+        check(PetConfig.parse(["openOnDoubleClick": 42]).openOnDoubleClick == "",
+              "config: bad double-click type falls back to default")
+
         // Wrong types fall back to defaults rather than crashing.
         check(PetConfig.parse(["size": "big"]).size == 62, "config: bad type falls back to default")
 
