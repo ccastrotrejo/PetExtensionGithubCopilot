@@ -21,6 +21,8 @@ final class PetState {
     var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0
     var phase: Double = 0
     var lastPoll: TimeInterval = 0
+    var facing: Facing = .front       // greet by looking at you
+    var nextTurn: TimeInterval = 0    // when to next glance around
 
     init(statePath: String) { self.statePath = statePath }
 }
@@ -66,6 +68,15 @@ final class PetView: NSView {
         let hbAgeMs = now * 1000.0 - state.heartbeat
         if hbAgeMs > 12_000 { NSApp.terminate(nil); return }
 
+        // Occasionally turn to look right / left / at you (skip the first frame
+        // so the initial facing sticks).
+        if now >= state.nextTurn {
+            if state.nextTurn != 0 {
+                state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
+            }
+            state.nextTurn = now + Double.random(in: 4...9)
+        }
+
         advanceMood(now: now)
         needsDisplay = true
     }
@@ -89,6 +100,11 @@ final class PetView: NSView {
         if raw != "hidden" { state.mood = Mood(rawValue: raw) ?? .idle }
         state.message = (obj["message"] as? String) ?? ""
         state.moodChangeTime = Date().timeIntervalSince1970
+        // On a fresh greeting, turn to face you for a moment.
+        if state.mood == .greet {
+            state.facing = .front
+            state.nextTurn = Date().timeIntervalSince1970 + 3
+        }
     }
 
     private func advanceMood(now: TimeInterval) {
@@ -129,23 +145,37 @@ final class PetView: NSView {
 
         // Pet body — crisp pixels: anti-aliasing off, origin snapped to whole
         // device pixels so no cell lands on a half-pixel (which would blur it).
+        // Left facing mirrors the side sprite; front is its own drawing.
         ctx.saveGState()
         ctx.setShouldAntialias(false)
         ctx.translateBy(x: cx.rounded(), y: cy.rounded())
-        ctx.scaleBy(x: 1, y: pose.scaleY)
-        drawDachshundPixel(size: petSize, pose: pose, phase: phase)
+        ctx.scaleBy(x: state.facing == .left ? -1 : 1, y: pose.scaleY)
+        if state.facing == .front {
+            drawDachshundFront(size: petSize, pose: pose, phase: phase)
+        } else {
+            drawDachshundPixel(size: petSize, pose: pose, phase: phase)
+        }
         ctx.restoreGState()
 
-        // Accessory (pixel-art icon near head) — same pixel unit as the dog.
+        // Accessory (pixel-art icon near head) — placed on the side the head
+        // faces (mirrored for left, up-and-right for front).
         if let acc = pose.accessory {
             ctx.saveGState()
             ctx.setShouldAntialias(false)
             let accBob = sin(phase * 4) * 3
-            // Most icons hover just above the head; the thought cloud floats
-            // up-and-right so it clears both the head and the speech bubble.
-            let ax = (cx + petSize * (acc == .think ? 0.58 : 0.38)).rounded()
-            let ay = (cy + petSize * (acc == .think ? 0.50 : 0.36) + accBob).rounded()
-            drawAccessory(acc, at: CGPoint(x: ax, y: ay), phase: phase)
+            let up = cy + petSize * (acc == .think ? 0.50 : 0.36) + accBob
+            switch state.facing {
+            case .right:
+                let ax = (cx + petSize * (acc == .think ? 0.58 : 0.38)).rounded()
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase)
+            case .left:
+                let ax = (cx - petSize * (acc == .think ? 0.58 : 0.38)).rounded()
+                ctx.translateBy(x: ax, y: 0); ctx.scaleBy(x: -1, y: 1); ctx.translateBy(x: -ax, y: 0)
+                drawAccessory(acc, at: CGPoint(x: ax, y: up.rounded()), phase: phase)
+            case .front:
+                let ax = (cx + petSize * 0.44).rounded()
+                drawAccessory(acc, at: CGPoint(x: ax, y: (cy + petSize * 0.55 + accBob).rounded()), phase: phase)
+            }
             ctx.restoreGState()
         }
 
@@ -235,6 +265,89 @@ final class PetView: NSView {
         if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
         drawEye(feat.eyes, box: box, phase: phase)
         drawMouth(feat.mouth, box: box, phase: phase)
+        ctx.restoreGState()
+    }
+
+    /// Face-on view of the dachshund: round head, both floppy ears, two eyes,
+    /// front paws. Symmetric around x = 0. Head group animates (tilt/sniff/tremble).
+    private func drawDachshundFront(size s: CGFloat, pose: Pose, phase: Double) {
+        let feat = pose.feat
+        let cell = max(2, (s / 26).rounded())
+        let footY = (-0.44 * s).rounded()
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+
+        func box(_ cx: Int, _ cy: Int, _ w: Int, _ h: Int, _ color: NSColor) {
+            color.setFill()
+            NSBezierPath(rect: NSRect(x: CGFloat(cx) * cell, y: footY + CGFloat(cy) * cell,
+                                      width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
+        }
+        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded())
+
+        // ---- BODY: two front legs + chest ----
+        func bodySolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
+            func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
+            p(-5, 0, 3, 4, PetView.cBody); p(2, 0, 3, 4, PetView.cBody)   // front legs
+            p(-6, 2, 12, 6, PetView.cBody); p(-5, 8, 10, 1, PetView.cBody)   // chest
+        }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { bodySolids(ox, oy, PetView.cOutline) }
+        bodySolids(0, 0, nil)
+        box(-1, 2, 2, 6, PetView.cTan)              // tan chest blaze
+        box(-5, 0, 3, 1, PetView.cTan); box(2, 0, 3, 1, PetView.cTan)   // paw tips
+        box(-6, 8, 12, 1, PetView.cBodyHi)          // chest top highlight
+
+        // ---- HEAD group: head, ears, face (tilts / bobs / trembles) ----
+        let jitter = pose.tremble > 0 ? CGFloat(Int((sin(phase * 34) * pose.tremble).rounded())) : 0
+        let px: CGFloat = 0, py = footY + CGFloat(7) * cell
+        ctx.saveGState()
+        ctx.translateBy(x: px + jitter * cell, y: py + pose.headBob * cell)
+        if pose.headTilt != 0 { ctx.rotate(by: pose.headTilt) }
+        ctx.translateBy(x: -px, y: -py)
+
+        func headSolids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
+            func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) { box(x + dx, y + dy, w, h, flat ?? real) }
+            p(-7, 7, 14, 9, PetView.cBody)                       // big round head
+            p(-6, 16, 12, 1, PetView.cBody); p(-6, 6, 12, 1, PetView.cBody)
+            p(-9, 8 + ear, 3, 8, PetView.cDark); p(6, 8 - ear, 3, 8, PetView.cDark)   // floppy ears
+        }
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] { headSolids(ox, oy, PetView.cOutline) }
+        headSolids(0, 0, nil)
+        box(-6, 15, 12, 1, PetView.cSaddle)         // dark cap on top of the head
+        box(-5, 14, 10, 1, PetView.cBodyHi)         // head highlight
+        box(-3, 8, 6, 3, PetView.cTan)              // tan muzzle
+        box(-1, 9, 2, 2, PetView.cNose)             // nose (center)
+        if feat.eyes == .happy { box(-6, 10, 2, 2, PetView.cCheek); box(4, 10, 2, 2, PetView.cCheek) }
+
+        // Two eyes
+        let blink = feat.eyes == .open && fmod(phase, 3.4) < 0.12
+        func frontEye(_ ex: Int) {
+            switch feat.eyes {
+            case .open, .worried:
+                if blink { box(ex, 12, 3, 1, PetView.cEye); return }
+                box(ex, 11, 3, 3, PetView.cOutline)
+                box(ex, 11, 2, 2, PetView.cEye)
+                box(ex + 1, 12, 1, 1, .white)       // catchlight
+            case .closed:
+                box(ex, 12, 3, 1, PetView.cEye)
+            case .happy:
+                box(ex, 11, 1, 1, PetView.cEye); box(ex + 1, 12, 1, 1, PetView.cEye); box(ex + 2, 11, 1, 1, PetView.cEye)
+            }
+        }
+        frontEye(-5); frontEye(2)
+        if feat.eyes == .worried {                  // brows angled inward = fretting
+            box(-5, 14, 2, 1, PetView.cOutline); box(3, 14, 2, 1, PetView.cOutline)
+        }
+
+        // Mouth (centered, below the nose)
+        switch feat.mouth {
+        case .neutral: box(-1, 8, 2, 1, PetView.cNose)
+        case .smile:   box(-2, 8, 1, 1, PetView.cNose); box(-1, 7, 2, 1, PetView.cNose); box(1, 8, 1, 1, PetView.cNose)
+        case .pant, .open:
+            box(-1, 7, 2, 2, PetView.cNose)
+            if feat.mouth == .pant {
+                let drop = Int((sin(phase * 8) * 0.5 + 0.5).rounded())
+                box(-1, 6 - drop, 2, 1 + drop, PetView.cTongue)
+            }
+        }
         ctx.restoreGState()
     }
 

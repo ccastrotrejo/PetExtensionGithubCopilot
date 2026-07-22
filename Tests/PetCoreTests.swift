@@ -65,6 +65,20 @@ enum PetCoreTests {
         check(Pose.make(for: .worried, phase: 0, message: "").headBob < 0, "worried: head lowered (cower)")
         check(Pose.make(for: .happy, phase: 0.25, message: "").bob > 0, "happy: bounces off the ground")
 
+        // MARK: Facing.turn — always turns to a different facing
+        check(Facing.turn(from: .right, random: 0.0) != .right, "from right never stays right (r=0)")
+        check(Facing.turn(from: .right, random: 0.99) != .right, "from right never stays right (r≈1)")
+        check(Facing.turn(from: .left, random: 0.5) != .left, "from left never stays left")
+        check(Facing.turn(from: .front, random: 0.5) != .front, "from front never stays front")
+        check(Facing.turn(from: .right, random: 0.0) == .left, "from right, r=0 → left (first option)")
+        check(Facing.turn(from: .front, random: 0.0) == .right, "from front, r=0 → right")
+        var reachedFront = false, reachedLeft = false
+        for i in 0..<100 {
+            let f = Facing.turn(from: .right, random: Double(i) / 100.0)
+            if f == .front { reachedFront = true }; if f == .left { reachedLeft = true }
+        }
+        check(reachedFront && reachedLeft, "from right, both left and front are reachable")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

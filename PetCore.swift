@@ -31,6 +31,26 @@ enum EyeState { case open, closed, happy, worried }
 enum MouthState { case neutral, smile, pant, open }
 enum Accessory { case wave, think, gear, sparkle, sweat, sleep }
 
+/// Which way the dog is looking. The pet turns at random intervals so it feels
+/// alive — mostly side-on, occasionally facing you.
+enum Facing {
+    case right, left, front
+
+    /// Pick a facing to turn to, different from `current`, given a uniform
+    /// random value in [0, 1). Sides are weighted heavier than front.
+    static func turn(from current: Facing, random r: Double) -> Facing {
+        var opts: [(Facing, Double)] = []
+        if current != .right { opts.append((.right, 0.4)) }
+        if current != .left  { opts.append((.left,  0.4)) }
+        if current != .front { opts.append((.front, 0.3)) }
+        let total = opts.reduce(0) { $0 + $1.1 }
+        let pick = r * total
+        var acc = 0.0
+        for (f, w) in opts { acc += w; if pick < acc { return f } }
+        return opts.last!.0
+    }
+}
+
 struct DogFeatures {
     var eyes: EyeState = .open
     var mouth: MouthState = .smile

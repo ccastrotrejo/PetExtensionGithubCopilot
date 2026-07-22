@@ -2,7 +2,8 @@
 
 A native macOS desktop companion (inspired by [pets-therapy.com](https://pets-therapy.com/)) that
 reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot extension** and renders a
-**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered).
+**pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered). It
+glances around on its own — looking left, right, or straight at you.
 
 ![The pet across its seven moods](assets/preview.png)
 
