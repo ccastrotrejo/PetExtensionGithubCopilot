@@ -93,10 +93,10 @@ reference: [`docs/config.md`](docs/config.md).
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig` (no AppKit). Unit-tested. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, and the `Behavior` composition pipeline (`PetBehaviors`), no AppKit. Unit-tested. |
 | `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
 | `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse`. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
@@ -106,6 +106,7 @@ reference: [`docs/config.md`](docs/config.md).
 - [`docs/copilot-extensions.md`](docs/copilot-extensions.md) — how Copilot extensions work (architecture, discovery, lifecycle).
 - [`docs/sdk-reference.md`](docs/sdk-reference.md) — the `@github/copilot-sdk` API: `joinSession`, hooks, session object, events.
 - [`docs/architecture.md`](docs/architecture.md) — this pet's design, IPC protocol, and decisions.
+- [`docs/behaviors.md`](docs/behaviors.md) — the behavior-composition system: how frames are built and how to add a behavior.
 - [`docs/development.md`](docs/development.md) — how to modify, compile, test, and debug.
 
 ## Auto-cleanup
