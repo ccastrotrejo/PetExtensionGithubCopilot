@@ -1,0 +1,5 @@
+# Compiled Swift binary (rebuilt on first load)
+.bin/
+
+# macOS
+.DS_Store
