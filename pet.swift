@@ -112,11 +112,19 @@ final class PetView: NSView {
         let cx = bounds.midX
         let cy = groundY + petSize * 0.5 + pose.bob
 
-        // Ground shadow
-        let shadowW = petSize * 1.05 * (1 - pose.bob / 220)
+        // Contact shadow — a crisp pixel oval hugging the paws on the ground
+        // line. It shrinks and fades as the dog bounces up, so a jump reads as
+        // leaving the ground rather than the whole dog floating.
+        let scell = max(2, (petSize / 26).rounded())
+        let ground = (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
+        let shrink = max(0.5, 1 - pose.bob / 34)
+        let halfW = (petSize * 0.55 * shrink / scell).rounded() * scell
         ctx.saveGState()
-        ctx.setFillColor(NSColor(white: 0, alpha: 0.16).cgColor)
-        ctx.fillEllipse(in: CGRect(x: cx - shadowW / 2, y: groundY - 8, width: shadowW, height: 9))
+        ctx.setShouldAntialias(false)
+        ctx.setFillColor(NSColor(white: 0, alpha: 0.20 * shrink).cgColor)
+        ctx.fill(CGRect(x: (cx - halfW).rounded(), y: ground - scell, width: halfW * 2, height: scell))
+        ctx.fill(CGRect(x: (cx - halfW + scell).rounded(), y: ground - scell * 2,
+                        width: (halfW - scell) * 2, height: scell))
         ctx.restoreGState()
 
         // Pet body — crisp pixels: anti-aliasing off, origin snapped to whole
@@ -161,13 +169,15 @@ final class PetView: NSView {
     private static let cEye      = NSColor(red: 0.13, green: 0.10, blue: 0.10, alpha: 1)
     private static let cTongue   = NSColor(red: 0.92, green: 0.44, blue: 0.47, alpha: 1)
     private static let cCheek    = NSColor(red: 0.95, green: 0.58, blue: 0.52, alpha: 0.55)
+    private static let cSaddle   = NSColor(red: 0.33, green: 0.17, blue: 0.09, alpha: 1) // dark back marking
 
     /// Draws a chibi pixel-art dachshund centred at the origin, facing right.
+    /// Long low body, tiny legs, long snout, floppy ears — the sausage-dog look.
     /// Whole-cell coordinates; y counts up from the feet. A dark outline pass
     /// (silhouette offset in 4 directions) keeps it readable on any wallpaper.
     private func drawDachshundPixel(size s: CGFloat, feat: DogFeatures, phase: Double) {
-        let cell = max(2, (s / 24).rounded())
-        let footY = (-0.46 * s).rounded()
+        let cell = max(2, (s / 26).rounded())
+        let footY = (-0.44 * s).rounded()
 
         func box(_ cx: Int, _ cy: Int, _ w: Int, _ h: Int, _ color: NSColor) {
             color.setFill()
@@ -175,31 +185,37 @@ final class PetView: NSView {
                                       width: CGFloat(w) * cell, height: CGFloat(h) * cell)).fill()
         }
 
-        let wo = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.6).rounded()) : 0
+        // Animated offsets: tail wags, ear flaps (faster when excited).
+        let wag = feat.wag > 0 ? Int((sin(phase * feat.wag) * 1.8).rounded()) : 0
+        let ear = Int((sin(phase * (feat.wag > 6 ? 7 : 2.6)) * 1).rounded())
 
         // Solid silhouette parts — reused for the dark outline pass and the fill.
         func solids(_ dx: Int, _ dy: Int, _ flat: NSColor?) {
             func p(_ x: Int, _ y: Int, _ w: Int, _ h: Int, _ real: NSColor) {
                 box(x + dx, y + dy, w, h, flat ?? real)
             }
-            // Body (rounded sausage)
-            p(-10, 5, 18, 5, PetView.cBody)
-            p(-9, 10, 16, 1, PetView.cBody); p(-9, 4, 16, 1, PetView.cBody)
-            // Legs (stubby)
-            for lx in [-8, -4, 3, 6] { p(lx, 0, 3, 5, PetView.cBody) }
-            // Head (big & round — chibi)
-            p(4, 6, 10, 9, PetView.cBody)
-            p(5, 15, 8, 1, PetView.cBody); p(5, 5, 8, 1, PetView.cBody)
-            // Ear (big floppy, droops past the jaw)
-            p(4, 3, 4, 10, PetView.cDark); p(5, 2, 3, 1, PetView.cDark)
-            // Muzzle
-            p(12, 6, 5, 4, PetView.cTan); p(16, 7, 1, 2, PetView.cTan)
-            // Tail
+            // Tail — long & tapering, held up off the rump (wags side to side)
             if feat.tailDown {
-                p(-11, 3, 2, 2, PetView.cDark); p(-12, 2, 2, 2, PetView.cDark)
+                p(-16, 2, 2, 3, PetView.cDark); p(-17, 1, 2, 2, PetView.cDark)
             } else {
-                p(-11, 8, 2, 2, PetView.cDark); p(-12 + wo, 10, 2, 2, PetView.cDark)
+                p(-16, 5, 2, 2, PetView.cDark)
+                p(-17, 7, 2, 2, PetView.cDark)
+                p(-18 + wag, 9, 2, 2, PetView.cDark)     // curled tip
             }
+            // Legs — very short & stubby (the dachshund signature)
+            for lx in [-13, -9, 5, 9] { p(lx, 0, 3, 3, PetView.cBody) }
+            // Body — long, low sausage
+            p(-15, 3, 25, 5, PetView.cBody)
+            p(-14, 8, 23, 1, PetView.cBody)              // rounded topline
+            p(-14, 2, 23, 1, PetView.cBody)              // rounded underline
+            // Head — big round chibi at the right end
+            p(7, 5, 11, 9, PetView.cBody)
+            p(8, 14, 9, 1, PetView.cBody); p(8, 4, 9, 1, PetView.cBody)
+            // Long snout tapering out to the right
+            p(16, 5, 6, 4, PetView.cBody)
+            p(21, 6, 2, 2, PetView.cBody)
+            // Ear — long & floppy, hangs down the cheek (sways)
+            p(7 + ear, 3, 4, 10, PetView.cDark); p(8, 2, 3, 1, PetView.cDark)
         }
 
         // 1) dark outline
@@ -207,53 +223,53 @@ final class PetView: NSView {
         // 2) flat fill
         solids(0, 0, nil)
 
-        // 3) shading + details (fill only)
-        box(-9, 9, 16, 1, PetView.cBodyHi)          // warm back highlight (top light)
-        box(5, 13, 8, 1, PetView.cBodyHi)           // head highlight
-        // Tan underside: a two-tone dachshund — belly along the bottom of the
-        // body plus a chest patch under the neck, not a floating mid-body bar.
-        box(-8, 5, 15, 2, PetView.cTan)             // belly (bottom rows, wide)
-        box(2, 6, 5, 3, PetView.cTan)               // chest under the head
-        box(-8, 5, 15, 1, PetView.cTanShade)        // shadow at the very bottom edge
-        for lx in [-8, -4, 3, 6] { box(lx, 0, 3, 1, PetView.cTan) }   // paws
-        box(12, 6, 5, 1, PetView.cTanShade)         // muzzle underside
-        box(15, 6, 2, 3, PetView.cNose)             // nose
-        if feat.eyes == .happy { box(10, 8, 2, 2, PetView.cCheek) }   // blush when delighted
+        // 3) two-tone markings + shading (fill only, top-left light)
+        box(-14, 6, 21, 3, PetView.cSaddle)         // dark saddle wraps the back
+        box(-13, 8, 21, 1, PetView.cBodyHi)         // warm topline highlight
+        box(8, 13, 8, 1, PetView.cBodyHi)           // head highlight
+        // Tan underside: belly along the bottom + chest under the neck.
+        box(-14, 2, 23, 2, PetView.cTan)            // belly (bottom rows, long)
+        box(6, 4, 5, 3, PetView.cTan)               // chest under the head
+        box(16, 5, 6, 2, PetView.cTan)              // tan under the snout
+        box(-14, 2, 23, 1, PetView.cTanShade)       // shadow at the very bottom edge
+        for lx in [-13, -9, 5, 9] { box(lx, 0, 3, 1, PetView.cTan) }   // paws
+        box(20, 5, 3, 3, PetView.cNose)             // nose at the snout tip
+        if feat.eyes == .happy { box(15, 7, 2, 2, PetView.cCheek) }    // blush when delighted
 
         drawEye(feat.eyes, box: box, phase: phase)
         drawMouth(feat.mouth, box: box, phase: phase)
     }
 
     private func drawEye(_ e: EyeState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
-        let blink = e == .open && fmod(phase, 3.6) < 0.13
+        let blink = e == .open && fmod(phase, 3.4) < 0.12
         switch e {
         case .open, .worried:
-            if blink { box(7, 11, 4, 1, PetView.cEye); return }
-            box(7, 10, 4, 4, PetView.cOutline)          // eye rim
-            box(7, 10, 3, 3, PetView.cEye)              // big round eye
-            box(9, 12, 1, 1, .white); box(8, 13, 1, 1, .white)  // catchlight sparkle
-            if e == .worried { box(6, 14, 4, 1, PetView.cOutline) }   // raised brow
+            if blink { box(12, 10, 4, 1, PetView.cEye); return }
+            box(12, 9, 4, 4, PetView.cOutline)          // eye rim
+            box(12, 9, 3, 3, PetView.cEye)              // big round eye
+            box(14, 11, 1, 1, .white); box(13, 12, 1, 1, .white)  // catchlight sparkle
+            if e == .worried { box(11, 13, 4, 1, PetView.cOutline) }   // raised brow
         case .closed:
-            box(7, 11, 4, 1, PetView.cEye)              // content lids
-            box(6, 12, 1, 1, PetView.cEye); box(10, 12, 1, 1, PetView.cEye)
+            box(12, 10, 4, 1, PetView.cEye)             // content lids
+            box(11, 11, 1, 1, PetView.cEye); box(15, 11, 1, 1, PetView.cEye)
         case .happy:
-            box(6, 11, 1, 1, PetView.cEye); box(7, 12, 1, 1, PetView.cEye)   // ^_^ arc
-            box(9, 12, 1, 1, PetView.cEye); box(10, 11, 1, 1, PetView.cEye)
-            box(8, 12, 1, 1, PetView.cEye)
+            box(11, 10, 1, 1, PetView.cEye); box(12, 11, 1, 1, PetView.cEye)   // ^_^ arc
+            box(14, 11, 1, 1, PetView.cEye); box(15, 10, 1, 1, PetView.cEye)
+            box(13, 11, 1, 1, PetView.cEye)
         }
     }
 
     private func drawMouth(_ m: MouthState, box: (Int, Int, Int, Int, NSColor) -> Void, phase: Double) {
         switch m {
         case .neutral:
-            box(13, 5, 3, 1, PetView.cNose)
+            box(18, 4, 2, 1, PetView.cNose)
         case .smile:
-            box(12, 5, 1, 1, PetView.cNose); box(13, 4, 3, 1, PetView.cNose)
+            box(17, 4, 1, 1, PetView.cNose); box(18, 3, 3, 1, PetView.cNose)
         case .pant, .open:
-            box(13, 4, 3, 2, PetView.cNose)
+            box(18, 3, 3, 2, PetView.cNose)
             if m == .pant {
                 let drop = Int((sin(phase * 8) * 0.5 + 0.5).rounded())
-                box(13, 3 - drop, 2, 1 + drop, PetView.cTongue)
+                box(18, 2 - drop, 2, 1 + drop, PetView.cTongue)
             }
         }
     }
