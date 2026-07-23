@@ -17,6 +17,8 @@ enum PetCoreTests {
         // MARK: Mood.autoNext — data-driven transitions
         check(Mood.greet.autoNext?.to == .idle && Mood.greet.autoNext?.after == 1.6, "greet → idle after 1.6s")
         check(Mood.happy.autoNext?.to == .idle && Mood.happy.autoNext?.after == 1.5, "happy → idle after 1.5s")
+        check(Mood.celebrate.autoNext?.to == .idle && Mood.celebrate.autoNext?.after == 2.0, "celebrate → idle after 2.0s")
+        check(Mood.nudge.autoNext?.to == .idle && Mood.nudge.autoNext?.after == 2.6, "nudge → idle after 2.6s")
         check(Mood.worried.autoNext?.to == .idle && Mood.worried.autoNext?.after == 2.4, "worried → idle after 2.4s")
         check(Mood.idle.autoNext?.to == .sleeping && Mood.idle.autoNext?.after == 18, "idle → sleeping after 18s")
         check(Mood.thinking.autoNext == nil, "thinking has no auto transition")
@@ -25,6 +27,8 @@ enum PetCoreTests {
 
         // MARK: Wire-protocol raw values
         check(Mood(rawValue: "worried") == .worried, "known raw value maps to case")
+        check(Mood(rawValue: "celebrate") == .celebrate, "celebrate is a wire mood")
+        check(Mood(rawValue: "nudge") == .nudge, "nudge is a wire mood")
         check(Mood(rawValue: "bogus") == nil, "unknown raw value is nil (caller falls back to idle)")
 
         // MARK: Pose.make — per-mood features
@@ -45,6 +49,27 @@ enum PetCoreTests {
 
         let happy = Pose.make(for: .happy, phase: 0, message: "")
         check(happy.accessory == .sparkle && happy.feat.eyes == .happy, "happy: sparkle, happy eyes")
+
+        // celebrate: a milestone party — sparkle + happy face like `happy`, but
+        // bouncier (bigger bob) with a giddy head wiggle, and it shows the
+        // milestone message (defaulting to 🎉).
+        let celebrate = Pose.make(for: .celebrate, phase: 0.25, message: "")
+        check(celebrate.accessory == .sparkle && celebrate.feat.eyes == .happy && celebrate.feat.wag >= 16,
+              "celebrate: sparkle, happy eyes, fast wag")
+        check(celebrate.bob > Pose.make(for: .happy, phase: 0.25, message: "").bob,
+              "celebrate: bounces higher than the routine 'done!'")
+        check(Pose.make(for: .celebrate, phase: 0, message: "").bubble == "🎉", "celebrate: default 🎉 bubble")
+        check(Pose.make(for: .celebrate, phase: 0, message: "tests pass! 🎉").bubble == "tests pass! 🎉",
+              "celebrate: shows the milestone message")
+
+        // nudge: a gentle break reminder — sleepy zzz + yawn, but eyes open (it
+        // faces you) and a low wag, distinct from `sleeping` (eyes closed, no bubble).
+        let nudge = Pose.make(for: .nudge, phase: 0, message: "")
+        check(nudge.accessory == .sleep && nudge.feat.mouth == .yawn && nudge.feat.eyes == .open,
+              "nudge: zzz, yawning, eyes open (still facing you)")
+        check(nudge.bubble == "take a break?", "nudge: default break bubble")
+        check(Pose.make(for: .nudge, phase: 0, message: "time for a break? 🐾").bubble == "time for a break? 🐾",
+              "nudge: shows the controller message")
 
         let worried = Pose.make(for: .worried, phase: 0, message: "")
         check(worried.accessory == .sweat && worried.feat.tailDown && worried.feat.wag == 0,
@@ -118,7 +143,7 @@ enum PetCoreTests {
         check(Pose.reducedMotionScale == 0.15, "reducedMotionScale is ~15%")
 
         // MARK: Reduce Motion — ambient wobble damped to ~15%, expressions untouched, per mood
-        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried, .loved] {
+        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .celebrate, .nudge, .worried, .loved] {
             let phase = 0.35 // away from zero for every mood's oscillating field
             let normal = Pose.make(for: mood, phase: phase, message: "hello")
             let damped = Pose.make(for: mood, phase: phase, message: "hello", reduceMotion: true)
@@ -186,6 +211,16 @@ enum PetCoreTests {
         check(PetConfig.parse(["speed": 1.5]).speed == 1.5, "config: speed parsed")
         check(PetConfig.parse(["speed": 0.1]).speed == 0.5, "config: speed clamps up to 0.5")
         check(PetConfig.parse(["speed": 9.0]).speed == 2.0, "config: speed clamps down to 2.0")
+
+        // Wellness nudges (issue #8): both off by default, consumed by the controller.
+        check(!defaults.celebrateMilestones, "config: celebrateMilestones defaults to off")
+        check(defaults.breakReminderMinutes == 0, "config: breakReminderMinutes defaults to 0 (off)")
+        check(PetConfig.parse(["celebrateMilestones": true]).celebrateMilestones, "config: celebrateMilestones parsed")
+        check(PetConfig.parse(["breakReminderMinutes": 50.0]).breakReminderMinutes == 50, "config: breakReminderMinutes parsed")
+        check(PetConfig.parse(["breakReminderMinutes": 0.0]).breakReminderMinutes == 0, "config: breakReminderMinutes 0 stays off")
+        check(PetConfig.parse(["breakReminderMinutes": -5.0]).breakReminderMinutes == 0, "config: negative breakReminderMinutes is off")
+        check(PetConfig.parse(["breakReminderMinutes": 0.2]).breakReminderMinutes == 1, "config: breakReminderMinutes clamps up to 1")
+        check(PetConfig.parse(["breakReminderMinutes": 9000.0]).breakReminderMinutes == 600, "config: breakReminderMinutes clamps down to 600")
 
         // resolvedPalette maps the name to a coat (unknown → default chestnut).
         check(PetConfig.parse(["palette": "cream"]).resolvedPalette == Palette.cream, "config: resolvedPalette maps name")
@@ -428,7 +463,7 @@ enum PetCoreTests {
 
         // #1 No visual regression: the default pipeline reproduces Pose.make for
         // every mood — at rest and mid-animation, with/without Reduce Motion.
-        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .worried] {
+        for mood: Mood in [.idle, .sleeping, .greet, .thinking, .working, .happy, .celebrate, .nudge, .worried] {
             for ph in [0.0, 0.4, 1.0] {
                 for rm in [false, true] {
                     let viaMake = Pose.make(for: mood, phase: ph, message: "hi", reduceMotion: rm)
