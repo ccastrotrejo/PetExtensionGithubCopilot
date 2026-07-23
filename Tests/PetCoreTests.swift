@@ -455,6 +455,7 @@ enum PetCoreTests {
         func samePose(_ a: Pose, _ b: Pose) -> Bool {
             a.bob == b.bob && a.scaleX == b.scaleX && a.scaleY == b.scaleY && a.headTilt == b.headTilt
                 && a.headBob == b.headBob && a.tremble == b.tremble && a.motionScale == b.motionScale
+                && a.walk == b.walk
                 && a.accessory == b.accessory && a.bubble == b.bubble
                 && a.feat.eyes == b.feat.eyes && a.feat.mouth == b.feat.mouth
                 && a.feat.wag == b.feat.wag && a.feat.tailDown == b.feat.tailDown
@@ -476,8 +477,8 @@ enum PetCoreTests {
                        PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9))),
               "behavior: pipeline reproduces the idle antic overlay")
 
-        // The default pipeline is exactly [MoodExpression, IdleAnticLayer].
-        check(PetBehaviors.pipeline.count == 2, "behavior: default pipeline has two behaviors")
+        // The default pipeline is exactly [MoodExpression, IdleAnticLayer, WalkCycle].
+        check(PetBehaviors.pipeline.count == 3, "behavior: default pipeline has three behaviors")
 
         // #2 Extensibility: a brand-new behavior contributes to the frame without
         // any change to MoodExpression, IdleAnticLayer, or the renderer.
@@ -509,6 +510,89 @@ enum PetCoreTests {
         check(PetBehaviors.render(bctx(.idle, rm: true)).motionScale == Pose.reducedMotionScale,
               "behavior: render seeds motionScale for Reduce Motion")
         check(PetBehaviors.render(bctx(.idle)).motionScale == 1, "behavior: render seeds motionScale = 1 normally")
+
+        // MARK: Roam config — opt-in behavior flag
+        check(!PetConfig().roam, "roam: off by default")
+        check(!PetConfig().behaviors.contains("roam"), "roam: not in the default behavior set")
+        check(PetConfig.knownBehaviors.contains("roam"), "roam: is a known behavior")
+        let roamCfg = PetConfig.parse(["enabledBehaviors": ["roam", "bubbles"]])
+        check(roamCfg.roam, "roam: enabled when listed in enabledBehaviors")
+        check(!roamCfg.lookAround, "roam: enabling roam alone leaves lookAround off")
+
+        // MARK: WalkCycle behavior — walk pose overlay
+        let standing = Pose.make(for: .idle, phase: 0.4, message: "")
+        check(standing.walk == 0, "walk: a standing pet has walk == 0")
+        let walkingPose = Pose.make(for: .idle, phase: 0.4, message: "", walking: true, walkPhase: 0.5)
+        check(walkingPose.walk == 0.5, "walk: walking publishes the walk-cycle phase")
+        check(walkingPose.feat.mouth == .pant && walkingPose.feat.wag >= 6, "walk: walking shows a lively panting trot")
+        check(Pose.make(for: .idle, phase: 0.4, message: "", walking: false, walkPhase: 0.5).walk == 0,
+              "walk: walking:false keeps walk == 0 regardless of walkPhase")
+        // A non-walking frame is unchanged whether or not WalkCycle is in the pipeline.
+        check(samePose(Pose.make(for: .idle, phase: 0.4, message: ""),
+                       PetBehaviors.render(bctx(.idle, phase: 0.4), through: [MoodExpression(), IdleAnticLayer()])),
+              "walk: WalkCycle is a no-op while standing")
+
+        // MARK: Roam physics — gravity, landing, wander, drag, edges
+        let floorY: CGFloat = 100, minX: CGFloat = 0, maxX: CGFloat = 500
+        let r0 = { () -> Double in 0.5 }   // fixed random for deterministic wander
+
+        // Gravity: dropped above the floor, it accelerates downward.
+        var falling = Roam()
+        let f1 = falling.step(x: 200, y: 300, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                              speed: 1, wander: true, dragging: false, random: r0)
+        check(f1.falling && !f1.walking && f1.y < 300, "roam: airborne pet falls under gravity")
+        let f2 = falling.step(x: 200, y: f1.y, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                              speed: 1, wander: true, dragging: false, random: r0)
+        check(falling.vy < 0 && f2.y < f1.y, "roam: fall speed builds up frame over frame")
+
+        // Landing: it settles exactly on the floor and reports `landed` once.
+        var lander = Roam()
+        var y = floorY + 3.0
+        var sawLanded = false, restedOnFloor = false
+        for _ in 0..<240 {
+            let f = lander.step(x: 200, y: y, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: false, dragging: false, random: r0)
+            y = f.y
+            if f.landed { sawLanded = true }
+            if !f.falling && abs(f.y - floorY) < 0.001 { restedOnFloor = true }
+        }
+        check(sawLanded, "roam: a drop reports a landing exactly once it touches down")
+        check(restedOnFloor, "roam: it comes to rest exactly on the floor line")
+
+        // Drag: physics is frozen while held, then falls on release.
+        var dragged = Roam()
+        let held = dragged.step(x: 200, y: 260, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: true, dragging: true, random: r0)
+        check(held.x == 200 && held.y == 260 && !held.falling, "roam: dragging freezes the pet where held")
+        let released = dragged.step(x: 200, y: 260, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                    speed: 1, wander: true, dragging: false, random: r0)
+        check(released.falling, "roam: releasing a lifted pet lets it fall")
+
+        // Wander: grounded + idle → it strolls; not-wander → it stands still.
+        var walker = Roam()
+        var wx: CGFloat = 200
+        var moved = false, stayedOnScreen = true
+        for _ in 0..<600 {
+            let f = walker.step(x: wx, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: true, dragging: false, random: { Double.random(in: 0..<1) })
+            if f.walking && f.x != wx { moved = true }
+            if f.x < minX || f.x > maxX { stayedOnScreen = false }
+            wx = f.x
+        }
+        check(moved, "roam: a grounded idle pet eventually strolls")
+        check(stayedOnScreen, "roam: never strolls off-screen")
+
+        var stander = Roam()
+        let standFrame = stander.step(x: 200, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                      speed: 1, wander: false, dragging: false, random: r0)
+        check(standFrame.x == 200 && !standFrame.walking, "roam: not wandering → stands on the floor")
+
+        // Edge bounce: forced against the right edge, it clamps and turns around.
+        var bouncer = Roam()
+        bouncer.gait = .walking; bouncer.dir = 1; bouncer.timer = 100
+        let atEdge = bouncer.step(x: maxX, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                  speed: 1, wander: true, dragging: false, random: r0)
+        check(atEdge.x == maxX && atEdge.dir == -1, "roam: hitting the right edge turns the pet around")
 
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
