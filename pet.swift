@@ -16,13 +16,10 @@ import ImageIO
 final class PetState {
     var statePath: String
     var sessionsDir: String            // dir of per-session state files to arbitrate
-    var lastKey: String = ""           // winner id + activity of the applied resolution
-    var mood: Mood = .greet
-    var message: String = ""
-    var work: WorkActivity = .general  // tool style while working (drives the micro-behavior overlay)
-    var moodChangeTime: TimeInterval = Date().timeIntervalSince1970
+    // The pet's mood + antic lifecycle (wire-driven mood, transient transitions,
+    // idle-antic scheduling) — owned by the pure, tested MoodMachine in PetCore.
+    var machine = MoodMachine(now: Date().timeIntervalSince1970)
     var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0  // freshest controller
-    var hadLiveSessions: Bool = false  // was any session live on the previous tick?
     var phase: Double = 0
     var lastPoll: TimeInterval = 0
     var facing: Facing = .front       // greet by looking at you
@@ -30,10 +27,6 @@ final class PetState {
     var config = PetConfig()          // user settings (hot-reloaded from config.json)
     var configPath: String = ""
     var configMTime: Double = -1      // last-seen config.json mtime; -1 = absent
-    var antic: Antic? = nil           // idle flourish currently playing (nil = plain idle)
-    var lastAntic: Antic? = nil       // last antic played, so we don't repeat it back-to-back
-    var anticStart: Double = 0        // phase clock when the current antic began
-    var nextAntic: Double = 0         // phase clock at which the next antic fires (0 = disarmed)
     var gaze: Gaze = .none            // cursor-watching state this tick (nil-object when not near)
     // Installed Petdex pack currently being rendered (nil = the flagship dog).
     // Loaded lazily by loadConfig when `activePet` names a pack, and reloaded
@@ -69,6 +62,37 @@ final class PetState {
 /// controller (extension.mjs) writes installs to the same path.
 func petsRootDir() -> String {
     (NSHomeDirectory() as NSString).appendingPathComponent(".copilot-pet/pets")
+}
+
+// MARK: - Session store (the IPC source the pet arbitrates over)
+
+/// Reads the per-session state files the pet arbitrates over. The only file IO
+/// for session state lives here; the decode rules and prune policy are the pure,
+/// unit-tested `SessionSnapshot.decode` / `isPrunable` in PetCore. Isolating the
+/// directory read behind this one interface is the seam that keeps the decode
+/// pipeline testable without a running app.
+struct SessionStore {
+    let dir: String
+
+    /// Read and decode every `*.json` session file, pruning ones whose controller
+    /// has been gone for good so the directory doesn't grow without bound.
+    /// `nowMs` is milliseconds since epoch.
+    func read(now nowMs: Double) -> [SessionSnapshot] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: dir) else { return [] }
+        var out: [SessionSnapshot] = []
+        for name in names where name.hasSuffix(".json") {
+            let full = dir + "/" + name
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: full)),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let snap = SessionSnapshot.decode(obj, fallbackId: (name as NSString).deletingPathExtension)
+            // Well past the stale window: the controller is gone — clean up.
+            if snap.isPrunable(now: nowMs) { try? fm.removeItem(atPath: full); continue }
+            out.append(snap)
+        }
+        return out
+    }
 }
 
 /// A decoded Petdex pet ready to render: its parsed `pet.json`, the decoded
@@ -141,6 +165,7 @@ enum PetMetrics {
 
 final class PetView: NSView {
     let state: PetState
+    let sessionStore: SessionStore
     let groundY: CGFloat = 40
     var petSize: CGFloat { state.config.size }   // user-configurable (config.json)
     var lastFrameTime: TimeInterval = Date().timeIntervalSince1970
@@ -166,6 +191,7 @@ final class PetView: NSView {
 
     init(frame: NSRect, state: PetState) {
         self.state = state
+        self.sessionStore = SessionStore(dir: state.sessionsDir)
         super.init(frame: frame)
         self.wantsLayer = true
         // Seed the coat + tooltip from the config the bootstrap already parsed, so
@@ -253,12 +279,9 @@ final class PetView: NSView {
     /// It auto-returns to idle (Mood.autoNext) and then re-syncs to the live
     /// session's mood (see advanceMood), so it never leaves the wire out of sync.
     private func petReaction() {
-        state.mood = .loved
-        state.message = ""
-        state.moodChangeTime = Date().timeIntervalSince1970
+        state.machine.setLoved(now: Date().timeIntervalSince1970)
         state.facing = .front            // turn to look at you when petted
         state.gaze = .none
-        state.antic = nil; state.nextAntic = 0
         needsDisplay = true
     }
 
@@ -335,7 +358,7 @@ final class PetView: NSView {
         // A playing idle antic is real motion, so it runs at the active cadence
         // even though the mood itself (idle) is otherwise calm/throttled. Roaming
         // (walking or falling) is likewise active motion.
-        let calm = Cadence.isCalm(state.mood) && state.antic == nil
+        let calm = Cadence.isCalm(state.machine.mood) && state.machine.antic == nil
             && !state.roamWalking && !state.roamFalling
         return Cadence.interval(reduceMotion: reduceMotionEnabled, calm: calm)
     }
@@ -384,7 +407,7 @@ final class PetView: NSView {
         // playing antic keeps priority). Recomputed every visible tick.
         state.gaze = .none
         if visible, state.config.usesDachshund, state.config.lookAround, !reduceMotionEnabled,
-           state.mood == .idle, state.antic == nil, !state.roamWalking, !state.roamFalling {
+           state.machine.mood == .idle, state.machine.antic == nil, !state.roamWalking, !state.roamFalling {
             let g = cursorGaze()
             if g.active {
                 state.gaze = g
@@ -421,62 +444,31 @@ final class PetView: NSView {
             state.heartbeat = freshest
         }
 
-        let resolution = Arbitration.resolve(sessions, now: nowMs, hadLiveSessions: state.hadLiveSessions)
-        state.hadLiveSessions = !Arbitration.liveSessions(sessions, now: nowMs).isEmpty
+        let resolution = Arbitration.resolve(sessions, now: nowMs, hadLiveSessions: state.machine.hadLiveSessions)
+        state.machine.hadLiveSessions = !Arbitration.liveSessions(sessions, now: nowMs).isEmpty
 
-        guard let res = resolution else { return }  // no live session → keep current pose
-
-        if case .quit = res.command { NSApp.terminate(nil); return }
-
-        // React only when the driving session/event changes, so a session that
-        // keeps re-writing the same mood doesn't reset local timers every poll.
-        let key = "\(res.winner)#\(res.activity)"
-        guard key != state.lastKey else { return }
-        state.lastKey = key
-
-        switch res.command {
-        case .quit:
-            return  // handled above
+        // The machine owns the mood change; the view performs the AppKit effect.
+        switch state.machine.apply(resolution, now: now) {
+        case .none:
+            return                          // no live session, or same driving event
+        case .terminate:
+            NSApp.terminate(nil)
         case .hide:
             self.window?.orderOut(nil)
-        case .show(let mood, let message):
+        case .show(let mood):
             if let win = self.window, !win.isVisible { win.orderFrontRegardless() }
-            state.mood = mood
-            state.message = message
-            state.work = res.work   // .general unless the winner is actively working
-            state.moodChangeTime = now
             // On a fresh greeting, turn to face you for a moment.
-            if state.mood == .greet {
+            if mood == .greet {
                 state.facing = .front
                 state.nextTurn = now + 3
             }
         }
     }
 
-    /// Read and parse every `*.json` session file, pruning long-dead ones so the
-    /// directory doesn't grow without bound.
+    /// Read and parse every session file (delegated to the `SessionStore` seam,
+    /// which also prunes long-dead ones).
     private func readSessions() -> [SessionSnapshot] {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: state.sessionsDir) else { return [] }
-        let nowMs = Date().timeIntervalSince1970 * 1000.0
-        var out: [SessionSnapshot] = []
-        for name in names where name.hasSuffix(".json") {
-            let full = state.sessionsDir + "/" + name
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: full)),
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
-            let heartbeat = (obj["heartbeat"] as? Double) ?? 0
-            // Well past the stale window: the controller is gone for good — clean up.
-            if nowMs - heartbeat > 60_000 { try? fm.removeItem(atPath: full); continue }
-            let id = (obj["id"] as? String) ?? (name as NSString).deletingPathExtension
-            let mood = (obj["mood"] as? String) ?? "idle"
-            let message = (obj["message"] as? String) ?? ""
-            let tool = (obj["tool"] as? String) ?? ""
-            let activity = (obj["activity"] as? Double) ?? (obj["ts"] as? Double) ?? 0
-            out.append(SessionSnapshot(id: id, mood: mood, message: message,
-                                       activity: activity, heartbeat: heartbeat, tool: tool))
-        }
-        return out
+        sessionStore.read(now: Date().timeIntervalSince1970 * 1000.0)
     }
 
     // Poll config.json for changes (hot-reload). Cheap: only re-parses when the
@@ -552,41 +544,16 @@ final class PetView: NSView {
     }
 
     private func advanceMood(now: TimeInterval) {
-        guard let n = state.mood.autoNext else { return }
-        if now - state.moodChangeTime > n.after {
-            let was = state.mood
-            state.mood = n.to
-            state.moodChangeTime = now
-            // A local `loved` reaction overrode the wire; on the way back to
-            // idle, clear lastKey so loadState re-applies whatever the live
-            // session is actually doing (e.g. resume "working").
-            if was == .loved { state.lastKey = "" }
-        }
+        state.machine.advance(now: now)
     }
 
-    /// Schedule and expire idle antics. Antics enliven the calm `idle` mood only:
-    /// any real mood — or Reduce Motion (OS setting or config override) — cancels
-    /// the current antic and disarms the scheduler, which re-arms on the next
-    /// return to idle. Timing runs on the animation `phase` clock so it matches
-    /// the pose the renderer draws.
+    /// Schedule and expire idle antics via the machine. Antics enliven the calm
+    /// `idle` mood only; Reduce Motion (OS or config) or roaming makes the pet
+    /// `busy`, which cancels the current antic and disarms the scheduler. Timing
+    /// runs on the animation `phase` clock so it matches the pose the renderer draws.
     private func updateAntics() {
-        let clock = state.phase
-        guard state.mood == .idle, !reduceMotionEnabled, !state.roamWalking, !state.roamFalling else {
-            state.antic = nil
-            state.nextAntic = 0
-            return
-        }
-        if let a = state.antic {
-            if clock - state.anticStart >= a.duration { state.antic = nil }   // finished → back to idle
-        } else if state.nextAntic == 0 {
-            state.nextAntic = clock + IdleAntics.nextGap(random: .random(in: 0..<1))   // arm the next gap
-        } else if clock >= state.nextAntic {
-            let a = IdleAntics.pick(random: .random(in: 0..<1), avoiding: state.lastAntic)
-            state.antic = a
-            state.lastAntic = a
-            state.anticStart = clock
-            state.nextAntic = 0    // re-armed once this antic ends
-        }
+        let busy = reduceMotionEnabled || state.roamWalking || state.roamFalling
+        state.machine.updateAntics(clock: state.phase, busy: busy) { .random(in: 0..<1) }
     }
 
     /// Drive one frame of roam-mode locomotion: advance the pure `Roam` physics
@@ -606,11 +573,10 @@ final class PetView: NSView {
         let vf = screen?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
 
         // Resting origin-y so the contact shadow (paws) lands on the floor line —
-        // matches the shadow geometry in draw().
-        let ground = (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
-        let floorY = vf.minY - ground
-        let minX = vf.minX
-        let maxX = vf.maxX - w
+        // the paw line is shared with the renderer via PetGeometry so the shadow
+        // and the physics floor can't drift apart.
+        let world = RoamWorld.make(visibleFrame: vf, windowWidth: w,
+                                   pawLine: PetGeometry.pawLine(groundY: groundY, petSize: petSize))
 
         // (Re)seed the fractional position from the real window whenever roam
         // (re)activates or the user is dragging, so a drag hands off cleanly to
@@ -623,10 +589,10 @@ final class PetView: NSView {
 
         // Wander (stroll) only when idle and not mid-antic; otherwise the pet just
         // stands on the floor. Gravity always applies, so a dropped pet still falls.
-        let wander = state.mood == .idle && state.antic == nil
+        let wander = state.machine.mood == .idle && state.machine.antic == nil
 
         let f = state.roam.step(x: state.roamX, y: state.roamY, dt: dt,
-                                floorY: floorY, minX: minX, maxX: maxX,
+                                floorY: world.floorY, minX: world.minX, maxX: world.maxX,
                                 speed: CGFloat(state.config.speed),
                                 wander: wander, dragging: isDraggingWindow,
                                 random: { Double.random(in: 0..<1) })
@@ -682,10 +648,10 @@ final class PetView: NSView {
 
         let W = bounds.width
         let phase = state.phase
-        let anticPhase = state.antic != nil ? max(0, phase - state.anticStart) : 0
-        var pose = Pose.make(for: state.mood, phase: phase, message: state.message,
+        let anticPhase = state.machine.antic != nil ? max(0, phase - state.machine.anticStart) : 0
+        var pose = Pose.make(for: state.machine.mood, phase: phase, message: state.machine.message,
                              reduceMotion: reduceMotionEnabled,
-                             antic: state.antic, anticPhase: anticPhase, work: state.work,
+                             antic: state.machine.antic, anticPhase: anticPhase, work: state.machine.work,
                              walking: state.roamWalking, walkPhase: state.walkPhase)
 
         // Roam landing squash: a quick squash-and-stretch right after a touchdown
@@ -717,7 +683,7 @@ final class PetView: NSView {
         // line. It shrinks and fades as the dog bounces up, so a jump reads as
         // leaving the ground rather than the whole dog floating.
         let scell = Sprite.cell(forSize: petSize)
-        let ground = (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
+        let ground = PetGeometry.pawLine(groundY: groundY, petSize: petSize)
         let shrink = max(0.5, 1 - pose.bob / 34)
         let halfW = (petSize * 0.55 * shrink / scell).rounded() * scell
         ctx.saveGState()
@@ -768,7 +734,7 @@ final class PetView: NSView {
         // A named pet introduces itself on greet — a subtle, once-per-session touch.
         if state.config.bubblesEnabled, let text = pose.bubble, !text.isEmpty {
             let name = state.config.name
-            let shown = (state.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
+            let shown = (state.machine.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
             drawBubble(shown, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
         }
     }
@@ -783,7 +749,7 @@ final class PetView: NSView {
     /// forward-facing animation set, so its own frames carry the expression.
     private func drawSpritePack(_ pack: LoadedPack, ctx: CGContext) {
         let W = bounds.width
-        let pdState = state.mood.petdexState
+        let pdState = state.machine.mood.petdexState
         let col = pack.sheet.frameIndex(phase: state.phase, frozen: reduceMotionEnabled)
         guard let frame = pack.image.cropping(to: pack.sheet.frameRect(state: pdState, col: col)) else { return }
 
@@ -799,11 +765,11 @@ final class PetView: NSView {
         // its bubble text so greet/worried/nudge messages read identically; its
         // motion fields are ignored here.
         guard state.config.bubblesEnabled else { return }
-        let pose = Pose.make(for: state.mood, phase: state.phase, message: state.message,
+        let pose = Pose.make(for: state.machine.mood, phase: state.phase, message: state.machine.message,
                              reduceMotion: reduceMotionEnabled, antic: nil, anticPhase: 0)
         if let text = pose.bubble, !text.isEmpty {
             let name = state.config.name
-            let shown = (state.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
+            let shown = (state.machine.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
             drawBubble(shown, petCenterX: (W / 2).rounded(), baseY: y + disp.height + 10, maxWidth: W)
         }
     }
