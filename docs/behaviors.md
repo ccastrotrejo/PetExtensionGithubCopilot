@@ -18,7 +18,8 @@ kept over the existing pure/testable `Pose`/`Mood` core (see issue #6).
 | `MoodExpression` | The deep module: a mood decodes to breathing, hops, head motion, eyes/mouth/tail, accessory, and bubble. |
 | `WorkActivityLayer` | Overlays a tool-specific micro-motion (`searching` sniff-track, `editing` dig, `running` alert) onto the `working` pose. Only in `working`; the tool style comes from `ctx.work`. |
 | `IdleAnticLayer` | Overlays the current idle antic (stretch, yawn, sniff…) onto the calm idle pose. Only in `idle`, never under Reduce Motion. |
-| `PetBehaviors` | The pipeline (`[MoodExpression(), WorkActivityLayer(), IdleAnticLayer()]`) and `render(_:through:)`, the composition entry point. |
+| `WalkCycle` | Roam mode: while the pet is walking it gets a trotting bob, a lively tail and a panting tongue, and publishes `Pose.walk` so `draw()` animates the legs. A no-op unless `ctx.walking`. |
+| `PetBehaviors` | The pipeline (`[MoodExpression(), WorkActivityLayer(), IdleAnticLayer(), WalkCycle()]`) and `render(_:through:)`, the composition entry point. |
 
 `Pose.make(...)` is a thin, stable adapter: it packages its arguments into a
 `BehaviorContext` and calls `PetBehaviors.render`. Keeping its signature means
@@ -32,7 +33,7 @@ let ctx = BehaviorContext(mood: mood, phase: phase, message: message,
                           reduceMotion: reduceMotion,
                           motionScale: reduceMotion ? Pose.reducedMotionScale : 1,
                           antic: antic, anticPhase: anticPhase)
-let pose = PetBehaviors.render(ctx)   // == [MoodExpression(), WorkActivityLayer(), IdleAnticLayer()]
+let pose = PetBehaviors.render(ctx)   // == [MoodExpression(), WorkActivityLayer(), IdleAnticLayer(), WalkCycle()]
 ```
 
 `render` seeds a fresh `Pose` with `motionScale` (so every behavior sees the same
@@ -60,7 +61,9 @@ context always yields the same `Pose`.
 Behaviors that need inputs beyond today's context (e.g. cursor position for a
 cursor-chase, or window/ground geometry for gravity/perch) should extend
 `BehaviorContext` with those fields and have `pet.swift` populate them — still
-without touching `draw()`'s pixel code. `WorkActivityLayer` is a worked example:
-it added a `work: WorkActivity` field to the context (fed by the agent's tool
-name over the wire) and overlays a tool-specific micro-motion onto the `working`
-pose, all without a renderer change.
+without touching `draw()`'s pixel code. Two worked examples: `WorkActivityLayer`
+added a `work: WorkActivity` field (fed by the agent's tool name over the wire)
+and overlays a tool-specific micro-motion onto the `working` pose; `WalkCycle`
+added `walking` / `walkPhase` for roam mode, driven by the pure `Roam` physics
+(gravity + desktop wander, in `PetCore.swift`), with only the leg lift read back
+in `draw()`. Both landed without a renderer change.
