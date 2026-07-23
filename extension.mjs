@@ -20,11 +20,12 @@ const petBin = path.join(binDir, "pet");
 // Mirrored by the `Mood` enum in PetCore.swift and documented in docs/state-protocol.md.
 const MOOD = {
   greet: "greet", thinking: "thinking", working: "working", happy: "happy",
+  celebrate: "celebrate", nudge: "nudge",
   worried: "worried", idle: "idle", sleeping: "sleeping",
   hidden: "hidden", quit: "quit",
 };
 const MOODS = {
-  display: [MOOD.greet, MOOD.thinking, MOOD.working, MOOD.happy, MOOD.worried, MOOD.idle, MOOD.sleeping],
+  display: [MOOD.greet, MOOD.thinking, MOOD.working, MOOD.happy, MOOD.celebrate, MOOD.nudge, MOOD.worried, MOOD.idle, MOOD.sleeping],
   control: [MOOD.hidden, MOOD.quit],
 };
 
@@ -80,6 +81,74 @@ function configWarning() {
     return `config.json is not valid JSON (${e.message}); the pet is using defaults.`;
   }
 }
+
+// --- Wellness nudges (issue #8) ---
+// Both features are opt-in via config.json and read the same file the pet
+// hot-reloads. We only need two keys here; the pet's PetConfig owns the full
+// schema. Cached by mtime so we can cheaply re-read on every relevant signal.
+let wellnessCfg = { mtime: -1, celebrateMilestones: false, breakReminderMinutes: 0 };
+function readWellnessConfig() {
+  try {
+    const { mtimeMs } = fs.statSync(configPath);
+    if (mtimeMs === wellnessCfg.mtime) return wellnessCfg;
+    const obj = JSON.parse(fs.readFileSync(configPath, "utf8")) || {};
+    const celebrateMilestones = obj.celebrateMilestones === true;
+    const raw = Number(obj.breakReminderMinutes);
+    const breakReminderMinutes =
+      Number.isFinite(raw) && raw > 0 ? Math.min(600, Math.max(1, raw)) : 0;
+    wellnessCfg = { mtime: mtimeMs, celebrateMilestones, breakReminderMinutes };
+  } catch {
+    // Absent or invalid config → both features off. Reset mtime so a later valid
+    // file is picked up on the next read.
+    wellnessCfg = { mtime: -1, celebrateMilestones: false, breakReminderMinutes: 0 };
+  }
+  return wellnessCfg;
+}
+
+// Pull a plain-text view out of a tool result, whatever shape the SDK hands us,
+// so we can sanity-check that a "successful" test command didn't actually report
+// failures (bash tool success ≠ exit 0).
+function resultText(r) {
+  if (r == null) return "";
+  if (typeof r === "string") return r;
+  if (typeof r === "object") {
+    return String(r.textResultForLlm ?? r.output ?? r.stdout ?? r.content ?? "");
+  }
+  return String(r);
+}
+
+// Common test-runner invocations. Watch modes never exit, so onPostToolUse won't
+// fire for them — no special-casing needed.
+const TEST_CMD = /\b(npm (run )?test|yarn (run )?test|pnpm (run )?test|jest|vitest|mocha|pytest|py\.test|tox|go test|cargo test|swift test|dotnet test|mvn test|gradle(w)? test|\.\/gradlew test|rspec|phpunit|ctest|make test|bun test|deno test)\b/;
+// Signals that a *successful* tool call actually reported test failures (bash
+// tool success ≠ exit 0). Keys on a NONZERO failure count so success summaries
+// that print "0 failures" / "0 failing" (rspec, mocha, swift…) aren't mistaken
+// for failures. The word alone is too broad — "0 failures" must still celebrate.
+const TEST_FAIL = /([1-9]\d*)\s+(fail(ed|ures?|ing)|errors?)\b|✗|✘|\btraceback\b|exit code [1-9]/i;
+
+// Map a *successful* tool call to a milestone, or null. Kept conservative so it
+// stays a rare, delightful signal rather than noise.
+function detectMilestone(toolName, toolArgs, toolResult) {
+  const key = String(toolName || "").split("-").pop();
+  if (key === "create_pull_request") return "PR is up! 🎉";
+  if (key === "bash" || key === "shell") {
+    const cmd = String(toolArgs?.command ?? toolArgs?.cmd ?? "");
+    if (/\bgh\s+pr\s+create\b/.test(cmd)) return "PR is up! 🎉";
+    if (/\bgh\s+pr\s+merge\b/.test(cmd)) return "merged! 🎉";
+    if (TEST_CMD.test(cmd) && !TEST_FAIL.test(resultText(toolResult))) return "tests pass! 🎉";
+  }
+  return null;
+}
+
+// A lull longer than this between activity and a new prompt counts as a real
+// break, so the continuous-work streak resets (you already rested).
+const BREAK_GAP_MS = 5 * 60_000;
+let streakStart = 0;          // ms the current continuous-work streak began (0 = none)
+let lastActive = 0;           // ms of the most recent activity
+let nudgedStreak = false;     // already nudged for the current streak?
+let celebration = null;       // milestone message pending for this turn (null = none)
+
+function markActive(now = Date.now()) { lastActive = now; }
 
 function writeState() {
   const payload = JSON.stringify({
@@ -299,25 +368,71 @@ const session = await joinSession({
       hasGreeted = true;
       setMood(MOOD.greet);
     },
-    onUserPromptSubmitted: async () => { setMood(MOOD.thinking); },
+    onUserPromptSubmitted: async () => {
+      const now = Date.now();
+      // Start (or restart, after a real break) the continuous-work streak that
+      // drives break nudges; a fresh turn also clears any pending celebration.
+      if (streakStart === 0 || now - lastActive > BREAK_GAP_MS) {
+        streakStart = now;
+        nudgedStreak = false;
+      }
+      celebration = null;
+      markActive(now);
+      setMood(MOOD.thinking);
+    },
     onPreToolUse: async (input) => {
       // Stay "working" across a whole run of tools; the label and the
       // tool-specific micro-behavior (see WorkActivity in PetCore.swift) change.
       if (input?.toolName === "pet_control") return;
+      markActive();
       setMood(MOOD.working, prettyTool(input?.toolName), input?.toolName);
     },
-    // No per-tool reaction on success: the pet keeps "working" until the turn
-    // ends, so it doesn't flash "done!" between every tool call.
-    onPostToolUseFailure: async () => { setMood(MOOD.worried); },
+    // Success path: no per-tool "done!", but watch for milestones so the pet can
+    // throw a little party (only when opted in). At most one per turn.
+    onPostToolUse: async (input) => {
+      markActive();
+      if (celebration || input?.toolName === "pet_control") return;
+      if (!readWellnessConfig().celebrateMilestones) return;
+      const milestone = detectMilestone(input?.toolName, input?.toolArgs, input?.toolResult);
+      if (milestone) {
+        celebration = milestone;
+        setMood(MOOD.celebrate, milestone); // instant feedback; re-asserted at idle
+      }
+    },
+    onPostToolUseFailure: async () => {
+      celebration = null; // a later failure outranks an earlier milestone this turn
+      setMood(MOOD.worried);
+    },
     onErrorOccurred: async () => { setMood(MOOD.worried); },
   },
 });
 
-// Turn finished: celebrate "done!" only if the pet was actually mid-task,
-// otherwise just relax. Avoids a spurious "done!" at startup or while idle.
+// Turn finished. Resolve the end-of-turn state in priority order:
+//   1. a milestone celebration (if one happened this turn and it's enabled),
+//   2. a gentle break nudge (after a long enough continuous-work streak),
+//   3. the usual "done!" if it was mid-task, else just relax.
+// Nudges fire only here (a turn boundary), never mid-work, and at most once per
+// streak — non-intrusive by construction (the pet never takes focus).
 session.on("session.idle", () => {
-  const wasBusy = current.mood === MOOD.working || current.mood === MOOD.thinking;
-  setMood(wasBusy ? MOOD.happy : MOOD.idle);
+  const now = Date.now();
+  markActive(now);
+  const cfg = readWellnessConfig();
+
+  if (celebration && cfg.celebrateMilestones) {
+    setMood(MOOD.celebrate, celebration);
+  } else if (
+    cfg.breakReminderMinutes > 0 &&
+    streakStart > 0 &&
+    !nudgedStreak &&
+    now - streakStart >= cfg.breakReminderMinutes * 60_000
+  ) {
+    nudgedStreak = true;
+    setMood(MOOD.nudge, "time for a break? 🐾");
+  } else {
+    const busy = [MOOD.working, MOOD.thinking, MOOD.celebrate].includes(current.mood);
+    setMood(busy ? MOOD.happy : MOOD.idle);
+  }
+  celebration = null;
 });
 
 if (bootError) {

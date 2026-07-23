@@ -66,6 +66,8 @@ parameter and are mirrored by `pet.swift`'s `Mood` enum.
 | `thinking` | Copilot is considering a prompt or speaking on command. |
 | `working` | Copilot is using a tool; `message` may describe the tool activity and `tool` names it. |
 | `happy` | The turn finished after real work — a brief "done!" celebration. |
+| `celebrate` | A milestone was reached — tests passed, or a PR was opened/merged — a bigger party than `happy`. Opt-in via `config.celebrateMilestones`; raised by the controller. |
+| `nudge` | A gentle "time for a break?" after a long continuous-work run. Opt-in via `config.breakReminderMinutes`; raised by the controller at a turn boundary. |
 | `worried` | A tool failed or an extension error occurred. |
 | `idle` | The turn is finished and the pet is relaxed. |
 | `sleeping` | The pet has been idle long enough to sleep. |

@@ -12,6 +12,13 @@ import CoreGraphics
 
 enum Mood: String {
     case greet, thinking, working, happy, worried, idle, sleeping
+    // `celebrate` and `nudge` are wellness signals the controller raises (see
+    // extension.mjs): `celebrate` marks a milestone (tests pass, a PR is
+    // opened/merged) with a bigger party than the routine "done!" `happy`, and
+    // `nudge` is a gentle "time for a break?" after a long continuous work run.
+    // Both travel the wire and are in the `MOODS` manifest; both are opt-in via
+    // config and auto-return to idle so they never linger.
+    case celebrate, nudge
     // `loved` is a *local* interaction mood: it is triggered only by clicking
     // (petting) the dog, never travels the wire, and is absent from the
     // `MOODS` manifest in extension.mjs. It plays a brief reaction, then
@@ -21,12 +28,14 @@ enum Mood: String {
     /// Automatic transition after a mood has been shown for `after` seconds.
     var autoNext: (after: TimeInterval, to: Mood)? {
         switch self {
-        case .greet:   return (1.6, .idle)
-        case .happy:   return (1.5, .idle)      // "done!" celebration, then relax
-        case .loved:   return (1.5, .idle)      // petting reaction, then relax
-        case .worried: return (2.4, .idle)
-        case .idle:    return (18,  .sleeping)
-        default:       return nil               // thinking / working persist until the next event
+        case .greet:     return (1.6, .idle)
+        case .happy:     return (1.5, .idle)    // "done!" celebration, then relax
+        case .celebrate: return (2.0, .idle)    // milestone party — lingers a touch longer
+        case .nudge:     return (2.6, .idle)    // gentle break reminder, then relax
+        case .loved:     return (1.5, .idle)    // petting reaction, then relax
+        case .worried:   return (2.4, .idle)
+        case .idle:      return (18,  .sleeping)
+        default:         return nil             // thinking / working persist until the next event
         }
     }
 }
@@ -556,6 +565,25 @@ struct MoodExpression: Behavior {
             p.scaleY = 1 + ((1 - hop) * 0.06 - hop * 0.03) * scale
             p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 13)
             p.accessory = .sparkle; p.bubble = message.isEmpty ? "done!" : message
+        case .celebrate:
+            // A milestone party — bigger, bouncier hops than the routine "done!"
+            // plus a little side-to-side wiggle, so it reads as a distinct,
+            // special celebration (tests pass, a PR opened/merged).
+            let hop = abs(sin(phase * 6.5))
+            p.bob = hop * 22 * scale                          // higher than happy's 16
+            p.scaleY = 1 + ((1 - hop) * 0.08 - hop * 0.04) * scale
+            p.headTilt = sin(phase * 9) * 0.14 * scale        // giddy wiggle
+            p.feat = DogFeatures(eyes: .happy, mouth: .smile, wag: 16)
+            p.accessory = .sparkle; p.bubble = message.isEmpty ? "🎉" : message
+        case .nudge:
+            // A gentle break reminder: a slow yawn and a sleepy head-tilt with a
+            // zzz. Deliberately low-energy so it invites rest without stealing
+            // attention; it still faces you (open eyes) rather than dozing off.
+            p.scaleY = 1 + sin(phase * 1.8) * 0.03 * scale
+            p.headBob = 0.4 * scale
+            p.headTilt = sin(phase * 1.2) * 0.10 * scale
+            p.feat = DogFeatures(eyes: .open, mouth: .yawn, wag: 1)
+            p.accessory = .sleep; p.bubble = message.isEmpty ? "take a break?" : message
         case .loved:
             // Petting reaction: a delighted wriggle — quick little hops, a fast
             // wagging tail and blushing (happy eyes) with a ♥. Deliberately has
@@ -632,6 +660,12 @@ struct PetConfig: Equatable {
     var palette: String = "chestnut"     // coat colour scheme (see Palette.named)
     var name: String = ""                // optional pet name, surfaced subtly (tooltip + greet)
     var speed: Double = 1                // animation speed multiplier (0.5…2.0)
+    // Wellness nudges (issue #8). These are consumed by the *controller*
+    // (extension.mjs), which detects milestones and long work runs — the
+    // renderer never reads them. Parsed and clamped here so the config schema
+    // stays one documented, unit-tested model (like `breed`).
+    var celebrateMilestones: Bool = false // party animation when tests pass / a PR opens/merges
+    var breakReminderMinutes: Double = 0  // 0 = off; nudge after this many minutes of continuous work
     /// What a double-click on the pet opens. Empty = the default host app
     /// (the GitHub Copilot app that spawned the pet); a bundle id, an app
     /// name/path, or "none"/"off" to disable. See `doubleClickAction`.
@@ -695,6 +729,12 @@ struct PetConfig: Equatable {
         if let s = obj["palette"] as? String, !s.isEmpty { c.palette = s }
         if let s = obj["name"] as? String { c.name = String(s.prefix(24)) }
         if let n = obj["speed"] as? Double { c.speed = min(2, max(0.5, n)) }
+        if let b = obj["celebrateMilestones"] as? Bool { c.celebrateMilestones = b }
+        // 0 (or any non-positive value) means "off"; a positive value is clamped
+        // to a sane 1…600-minute window.
+        if let n = obj["breakReminderMinutes"] as? Double {
+            c.breakReminderMinutes = n <= 0 ? 0 : min(600, max(1, n))
+        }
         if let s = obj["openOnDoubleClick"] as? String { c.openOnDoubleClick = s }
         return c
     }

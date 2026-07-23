@@ -15,6 +15,8 @@ GitHub Copilot app (configurable — see `openOnDoubleClick`).
 | Receives a prompt | 🐶 **thinks** 💭 (head tilts) |
 | Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) — signature tools get their own flourish: **searching** sniffs out a scent 👃, **editing** digs eagerly, **running a command** perks up alert 👂 |
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
+| Hits a milestone (opt-in) | 🐶 **celebrates** 🎉 (a bigger party) when tests pass or a PR opens/merges — enable with `celebrateMilestones` |
+| Works a long stretch (opt-in) | 🐶 gently **nudges** you 🐾 (yawns, "take a break?") after `breakReminderMinutes` of continuous work |
 | Hits an error / failure | 🐶 gets **worried** 💦 (brow up, tail tucked) |
 | Goes idle | 🐶 waits (gentle breathing) with occasional antics — a stretch, yawn, ear-scratch, sniff, dig, tail-chase or sit — then 😴 **sleeps** after ~18s |
 | You move the cursor near | 🐶 **watches your pointer** 👀 (eyes track it, head turns) |
