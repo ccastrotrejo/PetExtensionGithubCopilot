@@ -116,8 +116,8 @@ reference: [`docs/config.md`](docs/config.md).
 | File | Purpose |
 | --- | --- |
 | `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods, and hosts the `pet_control` + `pet_gallery` (Petdex) tools. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, the `Behavior` composition pipeline (`PetBehaviors`), and the Petdex model (`SpriteSheet`, `PetdexState`, `PetPackInfo`), no AppKit. Unit-tested. |
-| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; also renders installed Petdex spritesheets and exports the dachshund (`--export`). Schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, the `Behavior` composition pipeline (`PetBehaviors`), the mood lifecycle (`MoodMachine`), session decode (`SessionSnapshot.decode`) + `Arbitration`, floor geometry (`PetGeometry` / `RoamWorld`), and the Petdex model (`SpriteSheet`, `PetdexState`, `PetPackInfo`), no AppKit. Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; reads session files via the `SessionStore` seam and delegates its mood lifecycle to `MoodMachine`. Also renders installed Petdex spritesheets and exports the dachshund (`--export`). Schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
 | `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
 | `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition / Petdex model. |
 | `tools/export-dachshund.sh` | Export the dachshund as a submittable Petdex pet. |

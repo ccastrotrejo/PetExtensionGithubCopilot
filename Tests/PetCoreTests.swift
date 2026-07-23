@@ -716,6 +716,105 @@ enum PetCoreTests {
                                   speed: 1, wander: true, dragging: false, random: r0)
         check(atEdge.x == maxX && atEdge.dir == -1, "roam: hitting the right edge turns the pet around")
 
+        // MARK: SessionSnapshot.decode — pure decode of a session state object
+        let decoded = SessionSnapshot.decode(
+            ["id": "sess-1", "mood": "working", "message": "npm test",
+             "tool": "shell", "activity": 42.0, "heartbeat": 99.0],
+            fallbackId: "file-stem")
+        check(decoded.id == "sess-1" && decoded.mood == "working" && decoded.message == "npm test"
+              && decoded.tool == "shell" && decoded.activity == 42 && decoded.heartbeat == 99,
+              "decode: reads every field from the object")
+        check(SessionSnapshot.decode([:], fallbackId: "stem") ==
+              SessionSnapshot(id: "stem", mood: "idle", message: "", activity: 0, heartbeat: 0, tool: ""),
+              "decode: empty object → sane defaults (id from fallback, mood idle)")
+        check(SessionSnapshot.decode(["ts": 7.0], fallbackId: "s").activity == 7,
+              "decode: activity falls back to legacy `ts` when absent")
+        check(SessionSnapshot.decode(["activity": 5.0, "ts": 7.0], fallbackId: "s").activity == 5,
+              "decode: activity prefers `activity` over `ts`")
+        // Prune policy: gone past the window is prunable; merely stale is kept.
+        let dnow = 1_000_000.0
+        check(SessionSnapshot.decode(["heartbeat": dnow - SessionSnapshot.pruneAfterMs - 1], fallbackId: "s")
+                .isPrunable(now: dnow),
+              "decode: heartbeat past pruneAfterMs is prunable")
+        check(!SessionSnapshot.decode(["heartbeat": dnow - SessionSnapshot.pruneAfterMs + 1], fallbackId: "s")
+                .isPrunable(now: dnow),
+              "decode: heartbeat within pruneAfterMs is kept")
+        check(SessionSnapshot.pruneAfterMs > Arbitration.staleAfterMs,
+              "decode: prune window is looser than the arbitration stale window")
+
+        // MARK: PetGeometry.pawLine + RoamWorld — one owner for the floor geometry
+        let gy: CGFloat = 40, ps: CGFloat = 62
+        let expectedPaw = (gy + ps * 0.5 + (-0.44 * ps).rounded()).rounded()
+        check(PetGeometry.pawLine(groundY: gy, petSize: ps) == expectedPaw,
+              "pawLine: matches the historical paw-contact formula")
+        let vf = CGRect(x: 100, y: 50, width: 1440, height: 900)
+        let world = RoamWorld.make(visibleFrame: vf, windowWidth: 200,
+                                   pawLine: PetGeometry.pawLine(groundY: gy, petSize: ps))
+        check(world.floorY == vf.minY - expectedPaw, "roamWorld: floorY = visible bottom minus paw line")
+        check(world.minX == vf.minX && world.maxX == vf.maxX - 200,
+              "roamWorld: x bounds keep the window on-screen")
+
+        // MARK: MoodMachine — mood lifecycle, transient transitions, antics
+        let m0 = 10_000.0  // arbitrary "now" in seconds
+        func res(_ cmd: PetCommand, winner: String, activity: Double, work: WorkActivity = .general) -> Resolution {
+            Resolution(command: cmd, winner: winner, activity: activity, work: work)
+        }
+
+        // apply: nil resolution is a no-op; a show adopts the mood + message + work.
+        var mm = MoodMachine(now: m0)
+        check(mm.apply(nil, now: m0) == .none && mm.mood == .greet, "machine: nil resolution → no-op")
+        let showEff = mm.apply(res(.show(.working, message: "go"), winner: "a", activity: 1, work: .editing), now: m0)
+        check(showEff == .show(.working) && mm.mood == .working && mm.message == "go" && mm.work == .editing,
+              "machine: show adopts mood, message and work")
+        // The same driving (winner, activity) doesn't re-fire (timers don't reset).
+        check(mm.apply(res(.show(.working, message: "go"), winner: "a", activity: 1), now: m0 + 5) == .none,
+              "machine: same winner+activity → no-op (no timer reset)")
+        // A new activity from the same winner re-fires.
+        check(mm.apply(res(.show(.thinking, message: "hm"), winner: "a", activity: 2), now: m0 + 5) == .show(.thinking),
+              "machine: new activity re-fires")
+        // Control effects.
+        check(mm.apply(res(.hide, winner: "a", activity: 3), now: m0) == .hide, "machine: hidden → .hide effect")
+        check(mm.apply(res(.quit, winner: "a", activity: 4), now: m0) == .terminate, "machine: quit → .terminate effect")
+        // quit short-circuits before the change-key guard (always terminates).
+        var mmq = MoodMachine(now: m0)
+        check(mmq.apply(res(.quit, winner: "a", activity: 0), now: m0) == .terminate,
+              "machine: quit terminates even on the first resolution")
+
+        // advance: greet auto-transitions to idle after its delay; not before.
+        var mg = MoodMachine(now: m0)
+        _ = mg.apply(res(.show(.greet, message: ""), winner: "g", activity: 1), now: m0)
+        mg.advance(now: m0 + 1.0)
+        check(mg.mood == .greet, "machine: greet holds before its 1.6s delay")
+        mg.advance(now: m0 + 2.0)
+        check(mg.mood == .idle, "machine: greet → idle after the delay")
+
+        // setLoved then advance back to idle clears lastKey so the wire re-adopts.
+        var ml = MoodMachine(now: m0)
+        _ = ml.apply(res(.show(.working, message: "w"), winner: "a", activity: 1), now: m0)
+        ml.setLoved(now: m0 + 1)
+        check(ml.mood == .loved && ml.antic == nil, "machine: setLoved enters the loved reaction")
+        ml.advance(now: m0 + 1 + 2.0)   // loved → idle (1.5s)
+        check(ml.mood == .idle && ml.lastKey == "", "machine: loved → idle clears lastKey for re-sync")
+
+        // updateAntics: busy (reduce motion / roam) disarms; idle schedules then plays.
+        var ma = MoodMachine(now: m0)
+        _ = ma.apply(res(.show(.idle, message: ""), winner: "a", activity: 1), now: m0)
+        ma.updateAntics(clock: 100, busy: true) { 0.5 }
+        check(ma.antic == nil && ma.nextAntic == 0, "machine: busy disarms antics")
+        ma.updateAntics(clock: 100, busy: false) { 0.5 }
+        check(ma.antic == nil && ma.nextAntic > 100, "machine: idle arms the next antic gap")
+        ma.updateAntics(clock: ma.nextAntic, busy: false) { 0.5 }
+        check(ma.antic != nil, "machine: reaching the gap plays an antic")
+        let started = ma.antic!
+        ma.updateAntics(clock: ma.anticStart + started.duration, busy: false) { 0.5 }
+        check(ma.antic == nil, "machine: an antic expires after its duration")
+        // A non-idle mood also disarms any pending antic.
+        var mn = MoodMachine(now: m0)
+        _ = mn.apply(res(.show(.working, message: ""), winner: "a", activity: 1), now: m0)
+        mn.nextAntic = 5
+        mn.updateAntics(clock: 100, busy: false) { 0.5 }
+        check(mn.antic == nil && mn.nextAntic == 0, "machine: a non-idle mood disarms antics")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

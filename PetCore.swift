@@ -920,6 +920,34 @@ struct Roam {
     }
 }
 
+// MARK: - Pet floor geometry (shared by the renderer and roam physics)
+
+/// Origin-relative geometry of where the pet's paws meet the ground. One owner
+/// for the paw-contact line so the contact shadow (renderer) and the roam floor
+/// (physics) can never drift apart. Pure/testable.
+enum PetGeometry {
+    /// The y of the paw-contact line, relative to the view's bottom origin, for a
+    /// pet drawn bottom-centered at `petSize` on a baseline of `groundY`. This is
+    /// where the ground shadow sits and where roam rests the pet on the floor.
+    static func pawLine(groundY: CGFloat, petSize: CGFloat) -> CGFloat {
+        (groundY + petSize * 0.5 + (-0.44 * petSize).rounded()).rounded()
+    }
+}
+
+/// The horizontal travel bounds and floor line roam locomotion runs within,
+/// derived once from the screen's visible frame, the window width, and the pet's
+/// paw line — so `stepRoam` no longer computes floor geometry inline (and the
+/// renderer reads the same paw line). Pure/testable.
+struct RoamWorld: Equatable {
+    let floorY: CGFloat   // window origin-y at which the paws rest on the floor
+    let minX: CGFloat     // leftmost window origin-x on-screen
+    let maxX: CGFloat     // rightmost window origin-x keeping the window on-screen
+
+    static func make(visibleFrame vf: CGRect, windowWidth w: CGFloat, pawLine: CGFloat) -> RoamWorld {
+        RoamWorld(floorY: vf.minY - pawLine, minX: vf.minX, maxX: vf.maxX - w)
+    }
+}
+
 // MARK: - Config (user settings; hot-reloaded from config.json)
 
 /// User-adjustable settings, parsed from `config.json` next to the extension.
@@ -1088,6 +1116,31 @@ struct SessionSnapshot: Equatable {
     }
 }
 
+extension SessionSnapshot {
+    /// A controller heartbeat older than this (ms) means its file is dead for good
+    /// and can be pruned from disk (well past `Arbitration.staleAfterMs`, so a
+    /// merely-stale session is kept for arbitration but a gone one is cleaned up).
+    static let pruneAfterMs: Double = 60_000
+
+    /// Decode one already-parsed session state object into a snapshot. Every field
+    /// falls back to a sane default so a partial/older file still yields a usable
+    /// snapshot; `fallbackId` (the file's name stem) fills in a missing `id`.
+    /// Pure — the file IO and pruning live in the caller (see `SessionStore`).
+    static func decode(_ obj: [String: Any], fallbackId: String) -> SessionSnapshot {
+        let id = (obj["id"] as? String) ?? fallbackId
+        let mood = (obj["mood"] as? String) ?? "idle"
+        let message = (obj["message"] as? String) ?? ""
+        let tool = (obj["tool"] as? String) ?? ""
+        let activity = (obj["activity"] as? Double) ?? (obj["ts"] as? Double) ?? 0
+        let heartbeat = (obj["heartbeat"] as? Double) ?? 0
+        return SessionSnapshot(id: id, mood: mood, message: message,
+                               activity: activity, heartbeat: heartbeat, tool: tool)
+    }
+
+    /// Whether this snapshot's controller has been gone long enough to prune.
+    func isPrunable(now nowMs: Double) -> Bool { nowMs - heartbeat > Self.pruneAfterMs }
+}
+
 /// What the shared pet should do this tick.
 enum PetCommand: Equatable {
     case show(Mood, message: String)
@@ -1155,5 +1208,112 @@ enum Arbitration {
             command = .show(mood, message: winner.message)
         }
         return Resolution(command: command, winner: winner.id, activity: winner.activity, work: work)
+    }
+}
+
+// MARK: - Mood machine (the pet's mood + antic lifecycle)
+
+/// The pet's mood lifecycle, extracted from the renderer so it lives in one
+/// tested place instead of spread across `PetView.loadState/advanceMood/
+/// updateAntics`. It owns the wire-driven mood, its local transient transitions
+/// (greet→idle, …), and idle-antic scheduling. AppKit side effects are returned
+/// as `Effect`s for the view to perform; everything here is pure/testable.
+struct MoodMachine {
+    /// The AppKit action the view must take after `apply` — the machine never
+    /// touches windows itself.
+    enum Effect: Equatable {
+        case none          // nothing changed this poll
+        case terminate     // winner asked the shared pet to quit
+        case hide          // winner asked the shared pet to hide (orderOut)
+        case show(Mood)    // adopt this mood; the view brings the window forward
+    }
+
+    // Wire-driven mood the renderer reads.
+    var mood: Mood = .greet
+    var message: String = ""
+    var work: WorkActivity = .general           // tool style while working
+    var moodChangeTime: TimeInterval
+    var lastKey: String = ""                    // winner id + activity of the applied resolution
+    var hadLiveSessions: Bool = false           // was any session live on the previous poll?
+
+    // Idle-antic scheduling (a flourish that enlivens calm idle only).
+    var antic: Antic? = nil
+    var lastAntic: Antic? = nil                 // avoid repeating an antic back-to-back
+    var anticStart: Double = 0                  // phase clock when the current antic began
+    var nextAntic: Double = 0                   // phase clock at which the next antic fires (0 = disarmed)
+
+    init(now: TimeInterval) { moodChangeTime = now }
+
+    /// Apply the arbiter's verdict for this poll. Mutates the mood only when the
+    /// driving session/event actually changes (so a session re-writing the same
+    /// mood doesn't reset local timers), and returns the AppKit effect the view
+    /// must perform. `nil` (no live session) is a no-op.
+    mutating func apply(_ resolution: Resolution?, now: TimeInterval) -> Effect {
+        guard let res = resolution else { return .none }
+        if case .quit = res.command { return .terminate }
+
+        let key = "\(res.winner)#\(res.activity)"
+        guard key != lastKey else { return .none }
+        lastKey = key
+
+        switch res.command {
+        case .quit:
+            return .terminate
+        case .hide:
+            return .hide
+        case .show(let newMood, let newMessage):
+            mood = newMood
+            message = newMessage
+            work = res.work            // .general unless the winner is actively working
+            moodChangeTime = now
+            return .show(newMood)
+        }
+    }
+
+    /// Run the local transient transitions the renderer owns (greet→idle after
+    /// 1.6s, happy→idle, worried→idle, loved→idle). `thinking`/`working` persist.
+    mutating func advance(now: TimeInterval) {
+        guard let n = mood.autoNext else { return }
+        guard now - moodChangeTime > n.after else { return }
+        let was = mood
+        mood = n.to
+        moodChangeTime = now
+        // A local `loved` reaction overrode the wire; on the way back to idle,
+        // clear lastKey so the next `apply` re-adopts whatever the live session
+        // is actually doing (e.g. resume "working").
+        if was == .loved { lastKey = "" }
+    }
+
+    /// Schedule and expire idle antics. Antics play in calm `idle` only; `busy`
+    /// (Reduce Motion, or roaming) cancels the current antic and disarms the
+    /// scheduler, which re-arms on the next return to idle. `clock` is the
+    /// animation phase; `random` is a [0,1) source (injected for testability).
+    mutating func updateAntics(clock: Double, busy: Bool, random: () -> Double) {
+        guard mood == .idle, !busy else {
+            antic = nil
+            nextAntic = 0
+            return
+        }
+        if let a = antic {
+            if clock - anticStart >= a.duration { antic = nil }   // finished → back to idle
+        } else if nextAntic == 0 {
+            nextAntic = clock + IdleAntics.nextGap(random: random())   // arm the next gap
+        } else if clock >= nextAntic {
+            let a = IdleAntics.pick(random: random(), avoiding: lastAntic)
+            antic = a
+            lastAntic = a
+            anticStart = clock
+            nextAntic = 0    // re-armed once this antic ends
+        }
+    }
+
+    /// Enter the local `loved` reaction (petting): a brief delighted wriggle that
+    /// auto-returns to idle via `advance`, then re-syncs to the live session.
+    mutating func setLoved(now: TimeInterval) {
+        mood = .loved
+        message = ""
+        moodChangeTime = now
+        antic = nil
+        nextAntic = 0
     }
 }

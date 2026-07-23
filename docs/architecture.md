@@ -24,8 +24,9 @@ How `copilot-pet` is built and why. Two processes, one state file.
 
 Every local session runs its own controller, but only one dog is ever on screen (enforced by `pet.lock`). To
 keep concurrent sessions from stomping each other, **each controller writes its own file** under `sessions/`
-and the pet arbitrates. The decision logic lives in the pure, unit-tested `Arbitration` enum in
-`PetCore.swift`:
+and the pet arbitrates. The pet reads those files through the `SessionStore` seam (the only session-state
+file IO), which decodes each via the pure `SessionSnapshot.decode`; the decision logic lives in the pure,
+unit-tested `Arbitration` enum in `PetCore.swift`:
 
 - **Most-recent-activity wins** — the session that changed mood last drives the pet.
 - **Control signals are global** — a `hidden` / `quit` from the winning session acts on the one shared pet.
@@ -142,7 +143,10 @@ success reaction, so it no longer flashes "done!" between every call. `pet_contr
 
 ## Local (Swift-side) mood state machine
 
-The renderer owns transient/auto transitions so the controller only sends discrete events:
+The renderer owns transient/auto transitions so the controller only sends discrete events. That mood
+lifecycle — adopting the arbiter's mood, the auto transitions below, and antic scheduling — is the pure,
+unit-tested `MoodMachine` in `PetCore.swift`; `PetView` just feeds it each poll and performs the AppKit
+`Effect`s it returns (`terminate` / `hide` / `show`):
 
 - `greet` → `idle` after 1.6s
 - `happy` → `idle` after 1.5s
