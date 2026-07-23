@@ -40,6 +40,132 @@ enum Mood: String {
     }
 }
 
+// MARK: - Petdex interop (pet-pack format + spritesheet mapping)
+//
+// A "pet pack" is a Petdex-compatible pet: a `pet.json` plus a spritesheet laid
+// out as an 8×9 grid of 192×208 frames (see docs/petdex.md and
+// https://github.com/crafter-station/petdex). The rows are animation *states*;
+// the columns are the frames of that state's loop. This enum, the Mood→state
+// mapping, and the frame math are all pure so they're exercised directly by
+// PetCoreTests without decoding an image or running the app.
+
+/// The eight animation rows of a Petdex spritesheet, top to bottom. The raw
+/// value is only for debugging; `row` is the authoritative sheet index. A ninth
+/// grid row exists in the format but is a spare we never sample.
+enum PetdexState: String, CaseIterable {
+    case idle, wave, run, failed, review, jump, extra1, extra2
+
+    /// 0-based row index into the spritesheet grid.
+    var row: Int {
+        switch self {
+        case .idle:   return 0
+        case .wave:   return 1
+        case .run:    return 2
+        case .failed: return 3
+        case .review: return 4
+        case .jump:   return 5
+        case .extra1: return 6
+        case .extra2: return 7
+        }
+    }
+}
+
+extension Mood {
+    /// Map our mood vocabulary onto Petdex animation states so an installed
+    /// spritesheet pet reacts to the same Copilot signals as the bespoke dog.
+    /// Chosen so the pet reads correctly even though Petdex sheets are a fixed,
+    /// forward-facing set: greeting waves, work runs, failures play `failed`,
+    /// thinking uses the calmer `review`, and celebrations jump.
+    var petdexState: PetdexState {
+        switch self {
+        case .greet:     return .wave
+        case .thinking:  return .review
+        case .working:   return .run
+        case .happy:     return .jump
+        case .celebrate: return .jump
+        case .nudge:     return .wave
+        case .loved:     return .wave
+        case .worried:   return .failed
+        case .idle:      return .idle
+        case .sleeping:  return .idle
+        }
+    }
+}
+
+/// Geometry + timing of a Petdex spritesheet, resolved from a decoded image's
+/// pixel dimensions. Kept pure (no CoreGraphics image type) so frame math is
+/// unit-tested against plain integers. The invariant across Petdex sheets is the
+/// **192×208 frame size**, not a fixed row count — curated sheets vary (e.g. 8×9
+/// vs 8×11) — so we derive cols/rows by dividing the image by the frame size.
+struct SpriteSheet: Equatable {
+    let cols: Int          // frames per state (Petdex: 8)
+    let rows: Int          // animation-state rows in the grid (≥8; varies by sheet)
+    let frameW: Int        // px width of one frame
+    let frameH: Int        // px height of one frame
+    let fps: Double        // playback frames per second (Petdex default: 6)
+
+    /// The canonical Petdex frame + grid.
+    static let standardFrameW = 192
+    static let standardFrameH = 208
+    static let defaultCols = 8
+    static let defaultRows = 9
+    static let defaultFPS: Double = 6
+
+    /// Derive the grid from an image's pixel size, assuming Petdex's fixed
+    /// 192×208 frames. Returns nil unless the image divides cleanly into whole
+    /// frames of that size (a sheet we can't trust to slice). Both homelander
+    /// (8×9) and boba (8×11) satisfy this — only the row count differs.
+    static func from(imageWidth w: Int, imageHeight h: Int,
+                     frameW: Int = standardFrameW, frameH: Int = standardFrameH,
+                     fps: Double = defaultFPS) -> SpriteSheet? {
+        guard frameW > 0, frameH > 0, w >= frameW, h >= frameH,
+              w % frameW == 0, h % frameH == 0 else { return nil }
+        return SpriteSheet(cols: w / frameW, rows: h / frameH, frameW: frameW, frameH: frameH, fps: fps)
+    }
+
+    /// Which column (0-based) a state's loop is on at animation-clock `phase`
+    /// (seconds). Static (fps 0 or Reduce Motion) freezes on the first frame.
+    func frameIndex(phase: Double, frozen: Bool = false) -> Int {
+        guard cols > 0 else { return 0 }
+        if frozen || fps <= 0 { return 0 }
+        let n = Int((phase * fps).rounded(.down))
+        return ((n % cols) + cols) % cols
+    }
+
+    /// The pixel rect of one frame in *top-left origin* image space (the natural
+    /// coordinate system of a decoded CGImage), so callers can crop directly.
+    func frameRect(state: PetdexState, col: Int) -> CGRect {
+        let c = min(max(0, col), cols - 1)
+        let r = min(max(0, state.row), rows - 1)
+        return CGRect(x: c * frameW, y: r * frameH, width: frameW, height: frameH)
+    }
+}
+
+/// The metadata half of a pet pack — the parsed `pet.json`. The spritesheet
+/// itself is decoded by the renderer; this only carries what the format
+/// documents (`id`, `displayName`, `description`, `spritesheetPath`).
+struct PetPackInfo: Equatable {
+    var id: String
+    var displayName: String
+    var description: String
+    var spritesheetPath: String
+
+    /// Parse a decoded `pet.json`. `slug` seeds sensible fallbacks so a sparse
+    /// file (only `spritesheetPath`, say) still yields a usable pack. Returns nil
+    /// only when there's no spritesheet path to render at all.
+    static func parse(_ obj: [String: Any]?, slug: String) -> PetPackInfo? {
+        let obj = obj ?? [:]
+        let sheet = (obj["spritesheetPath"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A pack with no declared sheet path falls back to the conventional file
+        // name; only reject when we truly have nothing to point at.
+        let path = (sheet?.isEmpty == false ? sheet! : "spritesheet.webp")
+        let id = (obj["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? slug
+        let name = (obj["displayName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? slug
+        let desc = (obj["description"] as? String) ?? ""
+        return PetPackInfo(id: id, displayName: name, description: desc, spritesheetPath: path)
+    }
+}
+
 // MARK: - Animation cadence policy (testable, no AppKit)
 
 /// How often the view should tick/redraw. Kept separate from AppKit (pure
@@ -821,9 +947,24 @@ struct PetConfig: Equatable {
     /// (the GitHub Copilot app that spawned the pet); a bundle id, an app
     /// name/path, or "none"/"off" to disable. See `doubleClickAction`.
     var openOnDoubleClick: String = ""
+    /// Which pet the renderer shows. `"dachshund"` (the flagship, code-drawn dog)
+    /// is the default; any other value is treated as an installed Petdex pack
+    /// slug loaded from `~/.copilot-pet/pets/<slug>/` (see docs/petdex.md). An
+    /// unknown/broken slug falls back to the dachshund at render time.
+    var activePet: String = "dachshund"
 
     /// Behaviors the pet understands today. Unknown entries in the file are ignored.
     static let knownBehaviors: Set<String> = ["lookAround", "bubbles", "roam"]
+
+    /// The reserved slug for the built-in, code-drawn flagship dog. Any other
+    /// `activePet` value names an installed Petdex pack.
+    static let dachshundSlug = "dachshund"
+
+    /// Whether the flagship code-drawn dog is active (vs. an installed Petdex pack).
+    var usesDachshund: Bool {
+        let s = activePet.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return s.isEmpty || s == PetConfig.dachshundSlug
+    }
 
     /// The coat colour scheme to render, resolved from `palette` (falls back to
     /// the default coat for an unknown name).
@@ -890,6 +1031,13 @@ struct PetConfig: Equatable {
             c.breakReminderMinutes = n <= 0 ? 0 : min(600, max(1, n))
         }
         if let s = obj["openOnDoubleClick"] as? String { c.openOnDoubleClick = s }
+        // Active pet: the flagship dog by default, or an installed Petdex slug.
+        // Only a-z0-9/-/_ are accepted so the value is always a safe path segment.
+        if let s = obj["activePet"] as? String {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            let ok = !t.isEmpty && t.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+            if ok { c.activePet = t }
+        }
         return c
     }
 }

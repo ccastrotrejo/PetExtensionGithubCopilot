@@ -40,6 +40,7 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `openOnDoubleClick` | string | `""` | What **double-clicking the pet** opens. Empty (default) launches/focuses the **GitHub Copilot host app** that spawned the pet. Set a bundle id (`"com.github.githubapp"`), an app name (`"Copilot"`) or full path (`"/Applications/Copilot.app"`) to target something else, or `"none"`/`"off"` to disable double-click entirely. Single-click-drag still moves the pet regardless. |
 | `celebrateMilestones` | boolean | `false` | Opt-in wellness nudge. When `true`, the pet throws a brief celebration (a bigger, wigglier party than the routine "done!") when it detects a **milestone**: a test command passing, or a pull request being opened/merged (`gh pr create` / `gh pr merge`, or the PR tool). At most once per turn, and never on failure. Read by the controller (`extension.mjs`), not the renderer. |
 | `breakReminderMinutes` | number | `0` | Opt-in break reminder, in minutes (`0` = off). After this many minutes of **continuous work** the pet gives one gentle nudge — a yawn and a "take a break? 🐾" — at the next turn boundary. Positive values are clamped to `1`–`600`. A lull of over 5 minutes counts as a real break and resets the streak, so you get at most one nudge per work run. Never steals focus (the pet is an accessory window) and never fires mid-work. |
+| `activePet` | string | `"dachshund"` | Which pet to show. `"dachshund"` (default) is the built-in, code-drawn flagship dog; any other value is an installed [Petdex](petdex.md) pack slug (loaded from `~/.copilot-pet/pets/<slug>/`). Install and switch pets with the `pet_gallery` tool — you don't normally edit this by hand. Only `a–z 0–9 - _` are accepted; an unknown or broken slug falls back to the dachshund. See [docs/petdex.md](petdex.md). |
 
 ## Examples
 
@@ -87,6 +88,15 @@ after 50 minutes of continuous work:
 {
   "celebrateMilestones": true,
   "breakReminderMinutes": 50
+}
+```
+
+Show a community pet from the Petdex gallery instead of the dog (install it first
+with the `pet_gallery` tool — see [docs/petdex.md](petdex.md)):
+
+```json
+{
+  "activePet": "boba"
 }
 ```
 

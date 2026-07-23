@@ -1,0 +1,6 @@
+{
+  "description" : "The GitHub Copilot CLI companion — a chibi pixel-art dachshund that reacts to your coding agent's activity.",
+  "displayName" : "Copilot Dachshund",
+  "id" : "copilot-dachshund",
+  "spritesheetPath" : "spritesheet.png"
+}

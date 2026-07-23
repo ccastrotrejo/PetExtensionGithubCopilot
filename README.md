@@ -74,6 +74,16 @@ CI runs all three on every push (`.github/workflows/ci.yml`).
 The extension registers a `pet_control` tool. Ask the agent things like *"hide the pet"*,
 *"make the pet sleep"*, *"restart the pet"*. Actions: `mood`, `say`, `show`, `hide`, `quit`, `restart`.
 
+## Community pets (Petdex)
+
+Beyond the built-in dachshund, the pet can show community companions from the
+[Petdex](https://petdex.dev) gallery. The extension registers a `pet_gallery` tool —
+ask things like *"browse Petdex pets"*, *"install the boba pet"*, or *"switch back to
+the dachshund"*. Actions: `browse`, `install`, `use`, `installed`, `remove`. Installed
+spritesheet pets react to the same Copilot activity as the dog. Our dachshund can also
+be exported as a submittable Petdex pet (`tools/export-dachshund.sh`). Full details:
+[`docs/petdex.md`](docs/petdex.md).
+
 ## Configuration
 
 The pet works with zero setup. To customize it, copy the template and edit any keys you like — all
@@ -96,6 +106,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` | `dachshund` | Reserved for personalization (parsed, only the dachshund is drawn). |
 | `openOnDoubleClick` | `""` | What double-clicking the pet opens. Empty = the GitHub Copilot app; or a bundle id / app name / path, or `"none"` to disable. |
+| `activePet` | `dachshund` | Which pet to show: the built-in dog, or an installed [Petdex](docs/petdex.md) pack slug. Managed via the `pet_gallery` tool. |
 
 Missing keys fall back to defaults; an invalid file is ignored (the extension logs a warning). Full
 reference: [`docs/config.md`](docs/config.md).
@@ -104,17 +115,20 @@ reference: [`docs/config.md`](docs/config.md).
 
 | File | Purpose |
 | --- | --- |
-| `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods. |
-| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, and the `Behavior` composition pipeline (`PetBehaviors`), no AppKit. Unit-tested. |
-| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
+| `extension.mjs` | The Copilot extension. Compiles + spawns the pet, maps Copilot events → moods, and hosts the `pet_control` + `pet_gallery` (Petdex) tools. |
+| `PetCore.swift` | Pure model — `Mood`, `Pose`, `DogFeatures`, `Cadence`, `PetConfig`, the `Behavior` composition pipeline (`PetBehaviors`), and the Petdex model (`SpriteSheet`, `PetdexState`, `PetPackInfo`), no AppKit. Unit-tested. |
+| `pet.swift` | AppKit overlay window + pixel-art rendering, driven by `Pose`; also renders installed Petdex spritesheets and exports the dachshund (`--export`). Schedules ticks dynamically via `Cadence` and hot-reloads `config.json`. |
 | `config.example.json` | Copy to `config.json` to customize the pet (git-ignored). |
-| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition. |
+| `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition / Petdex model. |
+| `tools/export-dachshund.sh` | Export the dachshund as a submittable Petdex pet. |
+| `assets/petdex/copilot-dachshund/` | The exported Petdex pet (spritesheet + `pet.json`). |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
 ## Documentation
 
 - [`docs/config.md`](docs/config.md) — the `config.json` settings file: keys, defaults, hot-reload.
+- [`docs/petdex.md`](docs/petdex.md) — Petdex interop: the pet-pack format, browsing/installing community pets, and exporting our dachshund.
 - [`docs/copilot-extensions.md`](docs/copilot-extensions.md) — how Copilot extensions work (architecture, discovery, lifecycle).
 - [`docs/sdk-reference.md`](docs/sdk-reference.md) — the `@github/copilot-sdk` API: `joinSession`, hooks, session object, events.
 - [`docs/architecture.md`](docs/architecture.md) — this pet's design, IPC protocol, and decisions.
