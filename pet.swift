@@ -3,7 +3,7 @@
 // Reads a JSON state file and renders a pixel-art dachshund that reacts to Copilot activity.
 // The pet is static and can be dragged around the desktop; its position persists.
 //
-// state.json: { "mood": String, "message": String, "seq": Int, "heartbeat": Double(ms) }
+// state.json: { "mood": String, "message": String, "tool": String, "seq": Int, "heartbeat": Double(ms) }
 
 import Cocoa
 
@@ -18,6 +18,7 @@ final class PetState {
     var lastKey: String = ""           // winner id + activity of the applied resolution
     var mood: Mood = .greet
     var message: String = ""
+    var work: WorkActivity = .general  // tool style while working (drives the micro-behavior overlay)
     var moodChangeTime: TimeInterval = Date().timeIntervalSince1970
     var heartbeat: Double = Date().timeIntervalSince1970 * 1000.0  // freshest controller
     var hadLiveSessions: Bool = false  // was any session live on the previous tick?
@@ -360,6 +361,7 @@ final class PetView: NSView {
             if let win = self.window, !win.isVisible { win.orderFrontRegardless() }
             state.mood = mood
             state.message = message
+            state.work = res.work   // .general unless the winner is actively working
             state.moodChangeTime = now
             // On a fresh greeting, turn to face you for a moment.
             if state.mood == .greet {
@@ -387,9 +389,10 @@ final class PetView: NSView {
             let id = (obj["id"] as? String) ?? (name as NSString).deletingPathExtension
             let mood = (obj["mood"] as? String) ?? "idle"
             let message = (obj["message"] as? String) ?? ""
+            let tool = (obj["tool"] as? String) ?? ""
             let activity = (obj["activity"] as? Double) ?? (obj["ts"] as? Double) ?? 0
             out.append(SessionSnapshot(id: id, mood: mood, message: message,
-                                       activity: activity, heartbeat: heartbeat))
+                                       activity: activity, heartbeat: heartbeat, tool: tool))
         }
         return out
     }
@@ -563,7 +566,7 @@ final class PetView: NSView {
         let anticPhase = state.antic != nil ? max(0, phase - state.anticStart) : 0
         var pose = Pose.make(for: state.mood, phase: phase, message: state.message,
                              reduceMotion: reduceMotionEnabled,
-                             antic: state.antic, anticPhase: anticPhase,
+                             antic: state.antic, anticPhase: anticPhase, work: state.work,
                              walking: state.roamWalking, walkPhase: state.walkPhase)
 
         // Roam landing squash: a quick squash-and-stretch right after a touchdown

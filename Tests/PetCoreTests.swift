@@ -447,10 +447,10 @@ enum PetCoreTests {
         // MARK: - Behavior composition (issue #6) — pipeline reproduces moods and extends cleanly
 
         func bctx(_ mood: Mood, phase: Double = 0.4, message: String = "", rm: Bool = false,
-                  antic: Antic? = nil, anticPhase: Double = 0) -> BehaviorContext {
+                  antic: Antic? = nil, anticPhase: Double = 0, work: WorkActivity = .general) -> BehaviorContext {
             BehaviorContext(mood: mood, phase: phase, message: message, reduceMotion: rm,
                             motionScale: rm ? Pose.reducedMotionScale : 1,
-                            antic: antic, anticPhase: anticPhase)
+                            antic: antic, anticPhase: anticPhase, work: work)
         }
         func samePose(_ a: Pose, _ b: Pose) -> Bool {
             a.bob == b.bob && a.scaleX == b.scaleX && a.scaleY == b.scaleY && a.headTilt == b.headTilt
@@ -477,8 +477,8 @@ enum PetCoreTests {
                        PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9))),
               "behavior: pipeline reproduces the idle antic overlay")
 
-        // The default pipeline is exactly [MoodExpression, IdleAnticLayer, WalkCycle].
-        check(PetBehaviors.pipeline.count == 3, "behavior: default pipeline has three behaviors")
+        // The default pipeline is exactly [MoodExpression, WorkActivityLayer, IdleAnticLayer, WalkCycle].
+        check(PetBehaviors.pipeline.count == 4, "behavior: default pipeline has four behaviors")
 
         // #2 Extensibility: a brand-new behavior contributes to the frame without
         // any change to MoodExpression, IdleAnticLayer, or the renderer.
@@ -510,6 +510,56 @@ enum PetCoreTests {
         check(PetBehaviors.render(bctx(.idle, rm: true)).motionScale == Pose.reducedMotionScale,
               "behavior: render seeds motionScale for Reduce Motion")
         check(PetBehaviors.render(bctx(.idle)).motionScale == 1, "behavior: render seeds motionScale = 1 normally")
+
+        // MARK: - Work activity (issue #15) — tool-specific micro-behaviors
+
+        // Categorisation: signature tools map to a distinct style; namespaced
+        // MCP tools reduce to their last segment; everything else is .general.
+        check(WorkActivity.from(tool: "grep") == .searching, "work: grep → searching")
+        check(WorkActivity.from(tool: "glob") == .searching, "work: glob → searching")
+        check(WorkActivity.from(tool: "web_search") == .searching, "work: web_search → searching")
+        check(WorkActivity.from(tool: "github-mcp-server-search_code") == .searching, "work: namespaced search tool → searching")
+        check(WorkActivity.from(tool: "edit") == .editing, "work: edit → editing")
+        check(WorkActivity.from(tool: "create") == .editing, "work: create → editing")
+        check(WorkActivity.from(tool: "bash") == .running, "work: bash → running")
+        check(WorkActivity.from(tool: "view") == .general, "work: view → general (kept calm to avoid noise)")
+        check(WorkActivity.from(tool: "sql") == .general, "work: sql → general")
+        check(WorkActivity.from(tool: "some-unknown-mcp-tool") == .general, "work: unknown tool → general")
+
+        // Overlays are distinct from the plain working pose and from each other.
+        let workGeneral = Pose.make(for: .working, phase: 0.4, message: "")
+        let workSearch  = Pose.make(for: .working, phase: 0.4, message: "", work: .searching)
+        let workEdit    = Pose.make(for: .working, phase: 0.4, message: "", work: .editing)
+        let workRun     = Pose.make(for: .working, phase: 0.4, message: "", work: .running)
+        check(workGeneral.headTilt == 0 && abs(workSearch.headTilt) > 0.01,
+              "work: searching sweeps the head side to side (base working does not)")
+        check(workGeneral.bob == 0 && workEdit.bob > 0 && workEdit.headBob < 0,
+              "work: editing digs — energetic bob with a jabbing nose")
+        check(workRun.headBob > 0 && workRun.bob == 0 && workRun.feat.mouth == .neutral,
+              "work: running is alert — head lifted, body still, not panting")
+        check(workGeneral.feat.mouth == .pant, "work: base working keeps the panting mouth")
+
+        // Gated to the working mood: a work style never leaks into another mood.
+        check(samePose(Pose.make(for: .idle, phase: 0.4, message: "", work: .editing),
+                       Pose.make(for: .idle, phase: 0.4, message: "")),
+              "work: overlay is a no-op outside the working mood")
+        check(samePose(Pose.make(for: .happy, phase: 0.4, message: "", work: .running),
+                       Pose.make(for: .happy, phase: 0.4, message: "")),
+              "work: overlay does not touch the happy mood")
+
+        // Reduce Motion damps the overlay motion toward the base pose.
+        check(abs(Pose.make(for: .working, phase: 0.4, message: "", reduceMotion: true, work: .searching).headTilt)
+                <= abs(workSearch.headTilt) * Pose.reducedMotionScale + 1e-9,
+              "work: Reduce Motion damps the searching head-sweep")
+
+        // The arbiter surfaces the winning working session's tool style.
+        let workingSnap = SessionSnapshot(id: "w", mood: "working", message: "editing code",
+                                          activity: 10, heartbeat: 10, tool: "edit")
+        check(Arbitration.resolve([workingSnap], now: 10, hadLiveSessions: true)?.work == .editing,
+              "work: arbitration reports the winner's tool style")
+        let idleSnap = SessionSnapshot(id: "i", mood: "idle", message: "", activity: 10, heartbeat: 10, tool: "edit")
+        check(Arbitration.resolve([idleSnap], now: 10, hadLiveSessions: true)?.work == .general,
+              "work: a non-working winner reports .general regardless of tool")
 
         // MARK: Roam config — opt-in behavior flag
         check(!PetConfig().roam, "roam: off by default")

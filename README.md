@@ -15,7 +15,7 @@ GitHub Copilot app (configurable — see `openOnDoubleClick`). Enable **roam mod
 | --- | --- |
 | Starts a session | 🐶 **greets** you 👋 (happy eyes, tail wagging) |
 | Receives a prompt | 🐶 **thinks** 💭 (head tilts) |
-| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) |
+| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) — signature tools get their own flourish: **searching** sniffs out a scent 👃, **editing** digs eagerly, **running a command** perks up alert 👂 |
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits a milestone (opt-in) | 🐶 **celebrates** 🎉 (a bigger party) when tests pass or a PR opens/merges — enable with `celebrateMilestones` |
 | Works a long stretch (opt-in) | 🐶 gently **nudges** you 🐾 (yawns, "take a break?") after `breakReminderMinutes` of continuous work |
