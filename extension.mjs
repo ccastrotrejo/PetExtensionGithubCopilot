@@ -80,7 +80,7 @@ function pruneStaleSessions() {
 pruneStaleSessions();
 
 let seq = 0;
-let current = { mood: MOOD.greet, message: "" };
+let current = { mood: MOOD.greet, message: "", tool: "" };
 let lastActivity = Date.now(); // timestamp of the last mood change (drives arbitration)
 
 // Returns a warning string if config.json exists but isn't valid JSON, else null.
@@ -168,6 +168,7 @@ function writeState() {
     id: sessionId,
     mood: current.mood,
     message: current.message,
+    tool: current.tool,
     seq,
     ts: Date.now(),
     activity: lastActivity,
@@ -178,8 +179,10 @@ function writeState() {
   fs.renameSync(tmp, sessionPath); // atomic
 }
 
-function setMood(mood, message = "") {
-  current = { mood, message: String(message).slice(0, 48) };
+function setMood(mood, message = "", tool = "") {
+  // `tool` is the raw agent tool name; the pet categorises it (WorkActivity) to
+  // pick a working-mood micro-animation. Non-working moods pass "" to clear it.
+  current = { mood, message: String(message).slice(0, 48), tool: String(tool).slice(0, 40) };
   seq += 1;
   lastActivity = Date.now(); // a mood change is "activity"; heartbeats are not
   writeState();
@@ -614,10 +617,11 @@ const session = await joinSession({
       setMood(MOOD.thinking);
     },
     onPreToolUse: async (input) => {
-      // Stay "working" across a whole run of tools; only the label changes.
+      // Stay "working" across a whole run of tools; the label and the
+      // tool-specific micro-behavior (see WorkActivity in PetCore.swift) change.
       if (input?.toolName === "pet_control") return;
       markActive();
-      setMood(MOOD.working, prettyTool(input?.toolName));
+      setMood(MOOD.working, prettyTool(input?.toolName), input?.toolName);
     },
     // Success path: no per-tool "done!", but watch for milestones so the pet can
     // throw a little party (only when opted in). At most one per turn.

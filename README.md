@@ -5,7 +5,9 @@ reacts to what GitHub Copilot is doing. It runs as a **user-scoped Copilot exten
 **pixel-art dachshund** you can **drag anywhere** on your desktop (its position is remembered). It
 **watches your cursor** when it comes near, **glances around** on its own — looking left, right, or
 straight at you. **Click it to pet it** for a happy little wriggle, or **double-click** to jump to the
-GitHub Copilot app (configurable — see `openOnDoubleClick`).
+GitHub Copilot app (configurable — see `openOnDoubleClick`). Enable **roam mode** and it'll
+**walk around the desktop floor and fall with gravity** when you drop it (opt-in — see
+[`docs/config.md`](docs/config.md#roam-mode)).
 
 ![The pet across its seven moods](assets/preview.png)
 
@@ -13,7 +15,7 @@ GitHub Copilot app (configurable — see `openOnDoubleClick`).
 | --- | --- |
 | Starts a session | 🐶 **greets** you 👋 (happy eyes, tail wagging) |
 | Receives a prompt | 🐶 **thinks** 💭 (head tilts) |
-| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) |
+| Runs a tool | 🐶 **works** ⚙️ (pants, tongue out; bubble names the tool) — signature tools get their own flourish: **searching** sniffs out a scent 👃, **editing** digs eagerly, **running a command** perks up alert 👂 |
 | Finishes the whole task | 🐶 is **happy** ✨ (bounces, tail wags fast) |
 | Hits a milestone (opt-in) | 🐶 **celebrates** 🎉 (a bigger party) when tests pass or a PR opens/merges — enable with `celebrateMilestones` |
 | Works a long stretch (opt-in) | 🐶 gently **nudges** you 🐾 (yawns, "take a break?") after `breakReminderMinutes` of continuous work |
@@ -99,7 +101,7 @@ cp ~/.copilot/extensions/copilot-pet/config.example.json \
 | `palette` | `chestnut` | Coat colour: `chestnut`, `black-and-tan`, `red`, or `cream`. |
 | `name` | `""` | Name your pet — shown on hover and in its greeting. |
 | `lookAroundInterval` | `[4, 9]` | Seconds between glances (number or `[min, max]`). |
-| `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing + cursor-watching / speech bubbles. |
+| `enabledBehaviors` | `["lookAround", "bubbles"]` | Toggle glancing + cursor-watching / speech bubbles / `roam` (walk + gravity, off by default). |
 | `muted` | `false` | Suppress all speech bubbles. |
 | `reduceMotion` | `false` | Hold still (accessibility); combines with the OS Reduce Motion setting. |
 | `breed` | `dachshund` | Reserved for personalization (parsed, only the dachshund is drawn). |

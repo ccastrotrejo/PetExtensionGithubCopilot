@@ -31,7 +31,7 @@ malformed file simply falls back to the defaults (and the extension logs a warni
 | `size` | number | `62` | Pet size in points. Clamped to `32`–`160`; the window grows/shrinks to fit. Cells are integer-sized so the sprite stays crisp at any size. |
 | `speed` | number | `1` | Animation speed multiplier. Clamped to `0.5`–`2.0` — lower is calmer, higher is livelier. Scales the whole animation clock (breathing, wag, idle antics). |
 | `lookAroundInterval` | number \| `[min, max]` | `[4, 9]` | Seconds between autonomous glances (left / right / at-you). A single number fixes the interval; a pair randomizes within the range. Values below `1` are raised to `1`. |
-| `enabledBehaviors` | string[] | `["lookAround", "bubbles"]` | Which autonomous behaviors are on. Known values: `lookAround` (glancing **and** watching your cursor), `bubbles` (speech bubbles). Unknown entries are ignored; an empty list turns them all off. |
+| `enabledBehaviors` | string[] | `["lookAround", "bubbles"]` | Which autonomous behaviors are on. Known values: `lookAround` (glancing **and** watching your cursor), `bubbles` (speech bubbles), `roam` (walk around the desktop floor + gravity — see below; **off by default**). Unknown entries are ignored; an empty list turns them all off. |
 | `muted` | boolean | `false` | When `true`, suppresses all speech bubbles (a quick "quiet" toggle, independent of `enabledBehaviors`). |
 | `reduceMotion` | boolean | `false` | Accessibility: when `true`, non-essential motion (whole-body bob/breathing, head tilt/trembling, tail wag and ear-flap amplitude, accessory bob) is damped to ~15% and the gear/sparkle/panting-tongue animations freeze on one frame; look-around and cursor-watching stop too. Expressions (eyes, mouth, accessory, speech bubble) are unaffected. Combines with (does not replace) the OS-level Reduce Motion accessibility setting — either one stills the pet. |
 | `palette` | string | `"chestnut"` | Coat colour scheme. One of `chestnut` (red-and-tan), `black-and-tan`, `red`, or `cream`. Matched case-insensitively; an unknown name falls back to `chestnut`. |
@@ -99,6 +99,24 @@ with the `pet_gallery` tool — see [docs/petdex.md](petdex.md)):
   "activePet": "boba"
 }
 ```
+
+## Roam mode
+
+Add `"roam"` to `enabledBehaviors` to let the pet leave its spot: it strolls left
+and right along the **desktop floor** (the top of the Dock / the screen edge),
+turns around at the edges, and obeys **gravity** — lift it with a drag and drop it
+and it falls back down and lands with a little squash.
+
+```json
+{
+  "enabledBehaviors": ["lookAround", "bubbles", "roam"]
+}
+```
+
+Roam is **off by default**, so without it the pet stays exactly where you put it
+(static + draggable). It also pauses while the pet is reacting to your session
+(thinking / working / …) — it only wanders when idle — and it's fully suppressed
+under Reduce Motion (OS or config), where the pet stays static + draggable as usual.
 
 ## Where it's read
 

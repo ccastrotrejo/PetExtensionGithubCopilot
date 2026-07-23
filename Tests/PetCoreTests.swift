@@ -447,14 +447,15 @@ enum PetCoreTests {
         // MARK: - Behavior composition (issue #6) — pipeline reproduces moods and extends cleanly
 
         func bctx(_ mood: Mood, phase: Double = 0.4, message: String = "", rm: Bool = false,
-                  antic: Antic? = nil, anticPhase: Double = 0) -> BehaviorContext {
+                  antic: Antic? = nil, anticPhase: Double = 0, work: WorkActivity = .general) -> BehaviorContext {
             BehaviorContext(mood: mood, phase: phase, message: message, reduceMotion: rm,
                             motionScale: rm ? Pose.reducedMotionScale : 1,
-                            antic: antic, anticPhase: anticPhase)
+                            antic: antic, anticPhase: anticPhase, work: work)
         }
         func samePose(_ a: Pose, _ b: Pose) -> Bool {
             a.bob == b.bob && a.scaleX == b.scaleX && a.scaleY == b.scaleY && a.headTilt == b.headTilt
                 && a.headBob == b.headBob && a.tremble == b.tremble && a.motionScale == b.motionScale
+                && a.walk == b.walk
                 && a.accessory == b.accessory && a.bubble == b.bubble
                 && a.feat.eyes == b.feat.eyes && a.feat.mouth == b.feat.mouth
                 && a.feat.wag == b.feat.wag && a.feat.tailDown == b.feat.tailDown
@@ -476,8 +477,8 @@ enum PetCoreTests {
                        PetBehaviors.render(bctx(.idle, phase: 0.85, antic: .stretch, anticPhase: 0.9))),
               "behavior: pipeline reproduces the idle antic overlay")
 
-        // The default pipeline is exactly [MoodExpression, IdleAnticLayer].
-        check(PetBehaviors.pipeline.count == 2, "behavior: default pipeline has two behaviors")
+        // The default pipeline is exactly [MoodExpression, WorkActivityLayer, IdleAnticLayer, WalkCycle].
+        check(PetBehaviors.pipeline.count == 4, "behavior: default pipeline has four behaviors")
 
         // #2 Extensibility: a brand-new behavior contributes to the frame without
         // any change to MoodExpression, IdleAnticLayer, or the renderer.
@@ -582,6 +583,138 @@ enum PetCoreTests {
         check(PetConfig.parse(["activePet": "bad slug!"]).activePet == "dachshund", "config: unsafe slug rejected → default")
         check(PetConfig.parse(["activePet": ""]).usesDachshund, "config: empty activePet → dachshund")
         check(PetConfig.parse(["activePet": "DACHSHUND"]).usesDachshund, "config: case-insensitive dachshund")
+        // MARK: - Work activity (issue #15) — tool-specific micro-behaviors
+
+        // Categorisation: signature tools map to a distinct style; namespaced
+        // MCP tools reduce to their last segment; everything else is .general.
+        check(WorkActivity.from(tool: "grep") == .searching, "work: grep → searching")
+        check(WorkActivity.from(tool: "glob") == .searching, "work: glob → searching")
+        check(WorkActivity.from(tool: "web_search") == .searching, "work: web_search → searching")
+        check(WorkActivity.from(tool: "github-mcp-server-search_code") == .searching, "work: namespaced search tool → searching")
+        check(WorkActivity.from(tool: "edit") == .editing, "work: edit → editing")
+        check(WorkActivity.from(tool: "create") == .editing, "work: create → editing")
+        check(WorkActivity.from(tool: "bash") == .running, "work: bash → running")
+        check(WorkActivity.from(tool: "view") == .general, "work: view → general (kept calm to avoid noise)")
+        check(WorkActivity.from(tool: "sql") == .general, "work: sql → general")
+        check(WorkActivity.from(tool: "some-unknown-mcp-tool") == .general, "work: unknown tool → general")
+
+        // Overlays are distinct from the plain working pose and from each other.
+        let workGeneral = Pose.make(for: .working, phase: 0.4, message: "")
+        let workSearch  = Pose.make(for: .working, phase: 0.4, message: "", work: .searching)
+        let workEdit    = Pose.make(for: .working, phase: 0.4, message: "", work: .editing)
+        let workRun     = Pose.make(for: .working, phase: 0.4, message: "", work: .running)
+        check(workGeneral.headTilt == 0 && abs(workSearch.headTilt) > 0.01,
+              "work: searching sweeps the head side to side (base working does not)")
+        check(workGeneral.bob == 0 && workEdit.bob > 0 && workEdit.headBob < 0,
+              "work: editing digs — energetic bob with a jabbing nose")
+        check(workRun.headBob > 0 && workRun.bob == 0 && workRun.feat.mouth == .neutral,
+              "work: running is alert — head lifted, body still, not panting")
+        check(workGeneral.feat.mouth == .pant, "work: base working keeps the panting mouth")
+
+        // Gated to the working mood: a work style never leaks into another mood.
+        check(samePose(Pose.make(for: .idle, phase: 0.4, message: "", work: .editing),
+                       Pose.make(for: .idle, phase: 0.4, message: "")),
+              "work: overlay is a no-op outside the working mood")
+        check(samePose(Pose.make(for: .happy, phase: 0.4, message: "", work: .running),
+                       Pose.make(for: .happy, phase: 0.4, message: "")),
+              "work: overlay does not touch the happy mood")
+
+        // Reduce Motion damps the overlay motion toward the base pose.
+        check(abs(Pose.make(for: .working, phase: 0.4, message: "", reduceMotion: true, work: .searching).headTilt)
+                <= abs(workSearch.headTilt) * Pose.reducedMotionScale + 1e-9,
+              "work: Reduce Motion damps the searching head-sweep")
+
+        // The arbiter surfaces the winning working session's tool style.
+        let workingSnap = SessionSnapshot(id: "w", mood: "working", message: "editing code",
+                                          activity: 10, heartbeat: 10, tool: "edit")
+        check(Arbitration.resolve([workingSnap], now: 10, hadLiveSessions: true)?.work == .editing,
+              "work: arbitration reports the winner's tool style")
+        let idleSnap = SessionSnapshot(id: "i", mood: "idle", message: "", activity: 10, heartbeat: 10, tool: "edit")
+        check(Arbitration.resolve([idleSnap], now: 10, hadLiveSessions: true)?.work == .general,
+              "work: a non-working winner reports .general regardless of tool")
+
+        // MARK: Roam config — opt-in behavior flag
+        check(!PetConfig().roam, "roam: off by default")
+        check(!PetConfig().behaviors.contains("roam"), "roam: not in the default behavior set")
+        check(PetConfig.knownBehaviors.contains("roam"), "roam: is a known behavior")
+        let roamCfg = PetConfig.parse(["enabledBehaviors": ["roam", "bubbles"]])
+        check(roamCfg.roam, "roam: enabled when listed in enabledBehaviors")
+        check(!roamCfg.lookAround, "roam: enabling roam alone leaves lookAround off")
+
+        // MARK: WalkCycle behavior — walk pose overlay
+        let standing = Pose.make(for: .idle, phase: 0.4, message: "")
+        check(standing.walk == 0, "walk: a standing pet has walk == 0")
+        let walkingPose = Pose.make(for: .idle, phase: 0.4, message: "", walking: true, walkPhase: 0.5)
+        check(walkingPose.walk == 0.5, "walk: walking publishes the walk-cycle phase")
+        check(walkingPose.feat.mouth == .pant && walkingPose.feat.wag >= 6, "walk: walking shows a lively panting trot")
+        check(Pose.make(for: .idle, phase: 0.4, message: "", walking: false, walkPhase: 0.5).walk == 0,
+              "walk: walking:false keeps walk == 0 regardless of walkPhase")
+        // A non-walking frame is unchanged whether or not WalkCycle is in the pipeline.
+        check(samePose(Pose.make(for: .idle, phase: 0.4, message: ""),
+                       PetBehaviors.render(bctx(.idle, phase: 0.4), through: [MoodExpression(), IdleAnticLayer()])),
+              "walk: WalkCycle is a no-op while standing")
+
+        // MARK: Roam physics — gravity, landing, wander, drag, edges
+        let floorY: CGFloat = 100, minX: CGFloat = 0, maxX: CGFloat = 500
+        let r0 = { () -> Double in 0.5 }   // fixed random for deterministic wander
+
+        // Gravity: dropped above the floor, it accelerates downward.
+        var falling = Roam()
+        let f1 = falling.step(x: 200, y: 300, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                              speed: 1, wander: true, dragging: false, random: r0)
+        check(f1.falling && !f1.walking && f1.y < 300, "roam: airborne pet falls under gravity")
+        let f2 = falling.step(x: 200, y: f1.y, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                              speed: 1, wander: true, dragging: false, random: r0)
+        check(falling.vy < 0 && f2.y < f1.y, "roam: fall speed builds up frame over frame")
+
+        // Landing: it settles exactly on the floor and reports `landed` once.
+        var lander = Roam()
+        var y = floorY + 3.0
+        var sawLanded = false, restedOnFloor = false
+        for _ in 0..<240 {
+            let f = lander.step(x: 200, y: y, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: false, dragging: false, random: r0)
+            y = f.y
+            if f.landed { sawLanded = true }
+            if !f.falling && abs(f.y - floorY) < 0.001 { restedOnFloor = true }
+        }
+        check(sawLanded, "roam: a drop reports a landing exactly once it touches down")
+        check(restedOnFloor, "roam: it comes to rest exactly on the floor line")
+
+        // Drag: physics is frozen while held, then falls on release.
+        var dragged = Roam()
+        let held = dragged.step(x: 200, y: 260, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: true, dragging: true, random: r0)
+        check(held.x == 200 && held.y == 260 && !held.falling, "roam: dragging freezes the pet where held")
+        let released = dragged.step(x: 200, y: 260, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                    speed: 1, wander: true, dragging: false, random: r0)
+        check(released.falling, "roam: releasing a lifted pet lets it fall")
+
+        // Wander: grounded + idle → it strolls; not-wander → it stands still.
+        var walker = Roam()
+        var wx: CGFloat = 200
+        var moved = false, stayedOnScreen = true
+        for _ in 0..<600 {
+            let f = walker.step(x: wx, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                speed: 1, wander: true, dragging: false, random: { Double.random(in: 0..<1) })
+            if f.walking && f.x != wx { moved = true }
+            if f.x < minX || f.x > maxX { stayedOnScreen = false }
+            wx = f.x
+        }
+        check(moved, "roam: a grounded idle pet eventually strolls")
+        check(stayedOnScreen, "roam: never strolls off-screen")
+
+        var stander = Roam()
+        let standFrame = stander.step(x: 200, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                      speed: 1, wander: false, dragging: false, random: r0)
+        check(standFrame.x == 200 && !standFrame.walking, "roam: not wandering → stands on the floor")
+
+        // Edge bounce: forced against the right edge, it clamps and turns around.
+        var bouncer = Roam()
+        bouncer.gait = .walking; bouncer.dir = 1; bouncer.timer = 100
+        let atEdge = bouncer.step(x: maxX, y: floorY, dt: 1.0 / 60, floorY: floorY, minX: minX, maxX: maxX,
+                                  speed: 1, wander: true, dragging: false, random: r0)
+        check(atEdge.x == maxX && atEdge.dir == -1, "roam: hitting the right edge turns the pet around")
 
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
