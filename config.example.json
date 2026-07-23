@@ -10,5 +10,6 @@
   "name": "",
   "openOnDoubleClick": "",
   "celebrateMilestones": false,
-  "breakReminderMinutes": 0
+  "breakReminderMinutes": 0,
+  "activePet": "dachshund"
 }

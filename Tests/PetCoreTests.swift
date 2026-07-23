@@ -510,6 +510,79 @@ enum PetCoreTests {
               "behavior: render seeds motionScale for Reduce Motion")
         check(PetBehaviors.render(bctx(.idle)).motionScale == 1, "behavior: render seeds motionScale = 1 normally")
 
+        // MARK: - Petdex interop (issue #9/#10)
+
+        // Mood → Petdex animation state: the mapping every installed spritesheet
+        // pet reacts through. Keep these locked so a mood rename can't silently
+        // repoint a state row.
+        check(Mood.greet.petdexState == .wave, "petdex: greet → wave")
+        check(Mood.thinking.petdexState == .review, "petdex: thinking → review")
+        check(Mood.working.petdexState == .run, "petdex: working → run")
+        check(Mood.happy.petdexState == .jump, "petdex: happy → jump")
+        check(Mood.celebrate.petdexState == .jump, "petdex: celebrate → jump")
+        check(Mood.nudge.petdexState == .wave, "petdex: nudge → wave")
+        check(Mood.loved.petdexState == .wave, "petdex: loved → wave")
+        check(Mood.worried.petdexState == .failed, "petdex: worried → failed")
+        check(Mood.idle.petdexState == .idle, "petdex: idle → idle")
+        check(Mood.sleeping.petdexState == .idle, "petdex: sleeping → idle")
+
+        // Row indices are the on-sheet order (top to bottom).
+        check(PetdexState.idle.row == 0 && PetdexState.wave.row == 1 && PetdexState.run.row == 2,
+              "petdex: first rows idle/wave/run = 0/1/2")
+        check(PetdexState.jump.row == 5 && PetdexState.extra2.row == 7,
+              "petdex: jump=5, extra2=7 (last mapped row)")
+        check(PetdexState.allCases.map { $0.row } == Array(0..<8), "petdex: 8 states, rows 0…7 dense")
+
+        // SpriteSheet grid derivation — the frame size (192×208) is the invariant;
+        // real sheets vary in row count (homelander 8×9, boba 8×11).
+        let sheet9 = SpriteSheet.from(imageWidth: 1536, imageHeight: 1872)
+        check(sheet9?.cols == 8 && sheet9?.rows == 9 && sheet9?.frameW == 192 && sheet9?.frameH == 208,
+              "sheet: 1536×1872 → 8×9 of 192×208")
+        let sheet11 = SpriteSheet.from(imageWidth: 1536, imageHeight: 2288)
+        check(sheet11?.cols == 8 && sheet11?.rows == 11, "sheet: 1536×2288 → 8×11 (varying rows ok)")
+        check(SpriteSheet.from(imageWidth: 1500, imageHeight: 1872) == nil, "sheet: non-frame-multiple width → nil")
+        check(SpriteSheet.from(imageWidth: 100, imageHeight: 100) == nil, "sheet: too small → nil")
+
+        // frameIndex: column advances at fps and loops within cols; frozen/static
+        // holds the first frame.
+        let sheet = SpriteSheet(cols: 8, rows: 9, frameW: 192, frameH: 208, fps: 6)
+        check(sheet.frameIndex(phase: 0) == 0, "frameIndex: phase 0 → frame 0")
+        check(sheet.frameIndex(phase: 0.5) == 3, "frameIndex: 0.5s @6fps → frame 3")
+        check(sheet.frameIndex(phase: 8.0 / 6.0) == 0, "frameIndex: one full loop wraps to 0")
+        check(sheet.frameIndex(phase: 9.0 / 6.0) == 1, "frameIndex: loops past the end")
+        check(sheet.frameIndex(phase: 5, frozen: true) == 0, "frameIndex: frozen → frame 0")
+        check(SpriteSheet(cols: 8, rows: 9, frameW: 192, frameH: 208, fps: 0).frameIndex(phase: 5) == 0,
+              "frameIndex: fps 0 → frame 0")
+
+        // frameRect: top-left-origin pixel rect, clamped to the grid.
+        check(sheet.frameRect(state: .idle, col: 0) == CGRect(x: 0, y: 0, width: 192, height: 208),
+              "frameRect: idle col0 at origin")
+        check(sheet.frameRect(state: .run, col: 3) == CGRect(x: 576, y: 416, width: 192, height: 208),
+              "frameRect: run(row2) col3 offset")
+        check(sheet.frameRect(state: .extra2, col: 99).minX == 7 * 192,
+              "frameRect: out-of-range col clamps to last column")
+
+        // pet.json parsing — sparse files still yield a usable pack; slug seeds
+        // fallbacks; only a truly empty pointer is rejected... which never happens
+        // because we default the sheet filename.
+        let full = PetPackInfo.parse(
+            ["id": "boba", "displayName": "Boba", "description": "otter", "spritesheetPath": "sprite.webp"],
+            slug: "boba")
+        check(full?.id == "boba" && full?.displayName == "Boba" && full?.spritesheetPath == "sprite.webp",
+              "petjson: full object parses")
+        let sparse = PetPackInfo.parse([:], slug: "mystery")
+        check(sparse?.id == "mystery" && sparse?.displayName == "mystery" && sparse?.spritesheetPath == "spritesheet.webp",
+              "petjson: empty object falls back to slug + default sheet name")
+
+        // Config activePet — default dachshund; a valid slug switches; junk is
+        // rejected; usesDachshund tracks the flagship.
+        check(PetConfig().activePet == "dachshund" && PetConfig().usesDachshund, "config: default activePet = dachshund")
+        check(PetConfig.parse(["activePet": "boba"]).activePet == "boba", "config: valid slug accepted")
+        check(!PetConfig.parse(["activePet": "boba"]).usesDachshund, "config: a pack slug isn't the dachshund")
+        check(PetConfig.parse(["activePet": "bad slug!"]).activePet == "dachshund", "config: unsafe slug rejected → default")
+        check(PetConfig.parse(["activePet": ""]).usesDachshund, "config: empty activePet → dachshund")
+        check(PetConfig.parse(["activePet": "DACHSHUND"]).usesDachshund, "config: case-insensitive dachshund")
+
         print(failures == 0 ? "\n✓ ALL PASSED" : "\n✗ \(failures) FAILED")
         exit(failures == 0 ? 0 : 1)
     }

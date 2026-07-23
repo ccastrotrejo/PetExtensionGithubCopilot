@@ -40,6 +40,19 @@ const logPath = path.join(stateDir, "pet.log");
 // Optional user settings, read by both this extension and the pet. See docs/config.md.
 const configPath = path.join(extDir, "config.json");
 
+// --- Petdex ecosystem (issue #10) ---
+// Installed Petdex pet packs live under ~/.copilot-pet/pets/<slug>/ — the same
+// path the Swift renderer reads (petsRootDir() in pet.swift). The public Petdex
+// manifest lists every approved pet; we cache it in the state dir with a TTL so
+// browsing is cheap and offline-tolerant. See docs/petdex.md.
+const petsDir = path.join(os.homedir(), ".copilot-pet", "pets");
+const manifestCachePath = path.join(stateDir, "petdex-manifest.json");
+const MANIFEST_URL = "https://petdex.dev/api/manifest";
+const MANIFEST_TTL_MS = 6 * 60 * 60_000; // 6h
+const DACHSHUND_SLUG = "dachshund";
+// Only a-z0-9/-/_ — a Petdex slug must be a safe single path segment.
+const SLUG_RE = /^[a-z0-9_-]+$/i;
+
 // A stable id for this controller process. One extension.mjs == one session.
 const sessionId = randomUUID();
 const sessionPath = path.join(sessionsDir, `${sessionId}.json`);
@@ -259,6 +272,130 @@ function prettyTool(name = "") {
   return TOOL_LABELS[name] || TOOL_LABELS[key] || `using ${name}`;
 }
 
+// --- Petdex gallery helpers (issue #10) ---
+
+// Fetch the public Petdex manifest, cached to the state dir with a TTL. Returns
+// the parsed manifest ({ generatedAt, total, pets: [...] }). `force` bypasses the
+// cache. Falls back to any cached copy if the network fetch fails, so browsing
+// still works offline once warmed.
+async function fetchManifest(force = false) {
+  if (!force) {
+    try {
+      const st = fs.statSync(manifestCachePath);
+      if (Date.now() - st.mtimeMs < MANIFEST_TTL_MS) {
+        return JSON.parse(fs.readFileSync(manifestCachePath, "utf8"));
+      }
+    } catch {}
+  }
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20_000);
+    const res = await fetch(MANIFEST_URL, { redirect: "follow", signal: ctrl.signal });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`manifest fetch ${res.status}`);
+    const data = await res.json();
+    try { fs.writeFileSync(manifestCachePath, JSON.stringify(data)); } catch {}
+    return data;
+  } catch (e) {
+    // Network failed — fall back to a stale cache if we have one.
+    try { return JSON.parse(fs.readFileSync(manifestCachePath, "utf8")); } catch {}
+    throw e;
+  }
+}
+
+// Read config.json as a plain object (empty object if absent; throws on invalid
+// JSON so callers can surface the mistake instead of silently clobbering it).
+function readConfigObject() {
+  if (!fs.existsSync(configPath)) return {};
+  return JSON.parse(fs.readFileSync(configPath, "utf8")) || {};
+}
+
+// Merge-write a single config key, preserving every other setting. Atomic.
+function writeConfigKey(key, value) {
+  const obj = readConfigObject();
+  obj[key] = value;
+  const tmp = `${configPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n");
+  fs.renameSync(tmp, configPath);
+}
+
+// Slugs of packs installed under ~/.copilot-pet/pets/ (a dir with a pet.json).
+function listInstalled() {
+  let names = [];
+  try { names = fs.readdirSync(petsDir, { withFileTypes: true }); } catch { return []; }
+  return names
+    .filter((d) => d.isDirectory() && fs.existsSync(path.join(petsDir, d.name, "pet.json")))
+    .map((d) => d.name)
+    .sort();
+}
+
+// Download a URL to a file (bounded time). Rejects on non-2xx or empty body.
+async function downloadTo(url, dest, timeoutMs = 30_000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { redirect: "follow", signal: ctrl.signal });
+    if (!res.ok) throw new Error(`${res.status} for ${url}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0) throw new Error(`empty body for ${url}`);
+    fs.writeFileSync(dest, buf);
+    return buf.length;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Install a Petdex pet by slug: fetch its spritesheet + pet.json into
+// ~/.copilot-pet/pets/<slug>/. Rewrites pet.json's spritesheetPath to the local
+// filename so the renderer always finds it. Returns a short status string.
+async function installPack(slug) {
+  const manifest = await fetchManifest();
+  const pet = (manifest.pets || []).find((p) => p.slug === slug);
+  if (!pet) throw new Error(`no pet named "${slug}" in the gallery`);
+
+  const ext = /\.png($|\?)/i.test(pet.spritesheetUrl) ? "png" : "webp";
+  const dir = path.join(petsDir, slug);
+  const tmpDir = `${dir}.tmp-${Date.now()}`;
+  fs.mkdirSync(tmpDir, { recursive: true });
+  try {
+    const sheetName = `spritesheet.${ext}`;
+    const bytes = await downloadTo(pet.spritesheetUrl, path.join(tmpDir, sheetName));
+    // pet.json is optional/minimal upstream; build a clean local one either way,
+    // pointing at the file we just saved.
+    let meta = {};
+    if (pet.petJsonUrl) {
+      try {
+        const res = await fetch(pet.petJsonUrl, { redirect: "follow" });
+        if (res.ok) meta = (await res.json()) || {};
+      } catch {}
+    }
+    meta.id = meta.id || slug;
+    meta.displayName = meta.displayName || pet.displayName || slug;
+    meta.spritesheetPath = sheetName;
+    fs.writeFileSync(path.join(tmpDir, "pet.json"), JSON.stringify(meta, null, 2) + "\n");
+
+    // Promote the new pack into place, preserving any previous install until the
+    // swap succeeds: move the old dir aside, rename the new one in, then delete
+    // the backup. If the promote fails, restore the backup so a failed re-install
+    // never destroys a working pack.
+    const bak = `${dir}.bak-${Date.now()}`;
+    let backedUp = false;
+    try { fs.renameSync(dir, bak); backedUp = true; } catch (e) {
+      if (e.code !== "ENOENT") throw e;   // nothing to back up is fine
+    }
+    try {
+      fs.renameSync(tmpDir, dir);
+    } catch (e) {
+      if (backedUp) { try { fs.renameSync(bak, dir); } catch {} }   // restore on failure
+      throw e;
+    }
+    if (backedUp) fs.rmSync(bak, { recursive: true, force: true });
+    return `Installed "${slug}" (${(bytes / 1024).toFixed(0)} KB). Use it with pet_gallery use ${slug}.`;
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 // --- Boot the pet ---
 // Greet de-dup now lives in the pure arbiter (PetCore.swift): a greet only
 // plays on the 0→N live-session transition, so opening many sessions never
@@ -356,8 +493,107 @@ const petControl = {
   },
 };
 
+// Browse / install / select community pets from the Petdex gallery (issue #10).
+// Consuming the public manifest gives users variety without us rebuilding a
+// gallery; the flagship dachshund stays the default. Installed packs render via
+// the Swift spritesheet loader and react to the same moods.
+const petGallery = {
+  name: "pet_gallery",
+  description:
+    "Browse and install community pets from the Petdex gallery (petdex.dev), then choose which pet the desktop companion shows. Actions: browse (search the gallery), install (download a pet by slug), use (switch the active pet — a slug or 'dachshund' for the built-in dog), installed (list downloaded pets), remove (delete a downloaded pet).",
+  parameters: {
+    type: "object",
+    properties: {
+      action: {
+        type: "string",
+        enum: ["browse", "install", "use", "installed", "remove"],
+        description: "What to do.",
+      },
+      slug: {
+        type: "string",
+        description: "Pet slug for install/use/remove (e.g. 'boba'), or 'dachshund' for 'use' to restore the built-in dog.",
+      },
+      query: { type: "string", description: "Optional search text for 'browse' (matches name, slug, kind)." },
+      limit: { type: "number", description: "Max results for 'browse' (default 15)." },
+    },
+    required: ["action"],
+  },
+  handler: async (args) => {
+    const { action } = args || {};
+    const slug = String(args?.slug || "").trim();
+    try {
+      switch (action) {
+        case "browse": {
+          const manifest = await fetchManifest();
+          const pets = manifest.pets || [];
+          const q = String(args?.query || "").trim().toLowerCase();
+          const limit = Math.min(50, Math.max(1, Number(args?.limit) || 15));
+          const matches = (q
+            ? pets.filter((p) =>
+                [p.slug, p.displayName, p.kind, p.submittedBy]
+                  .some((f) => String(f || "").toLowerCase().includes(q)))
+            : pets
+          ).slice(0, limit);
+          if (matches.length === 0) return `No pets match "${q}". Try a broader search.`;
+          const lines = matches.map(
+            (p) => `• ${p.slug} — ${p.displayName || p.slug}${p.kind ? ` (${p.kind})` : ""}${p.submittedBy ? ` by ${p.submittedBy}` : ""}`,
+          );
+          const header = q
+            ? `${matches.length} of ${pets.length} pets matching "${q}":`
+            : `${matches.length} of ${pets.length} gallery pets:`;
+          return `${header}\n${lines.join("\n")}\n\nInstall one with pet_gallery install <slug>.`;
+        }
+        case "install": {
+          if (!SLUG_RE.test(slug)) return `Provide a valid pet slug to install (a-z, 0-9, -, _).`;
+          return await installPack(slug);
+        }
+        case "use": {
+          const target = slug || DACHSHUND_SLUG;
+          if (!SLUG_RE.test(target)) return `Invalid pet name "${target}".`;
+          if (target.toLowerCase() !== DACHSHUND_SLUG && !listInstalled().includes(target)) {
+            return `"${target}" isn't installed. Install it first: pet_gallery install ${target}.`;
+          }
+          try {
+            writeConfigKey("activePet", target);
+          } catch (e) {
+            return `Couldn't update config.json (${e.message}). Fix or remove it, then retry.`;
+          }
+          return target.toLowerCase() === DACHSHUND_SLUG
+            ? "Switched back to the built-in dachshund."
+            : `Now showing "${target}". The pet updates within a couple of seconds.`;
+        }
+        case "installed": {
+          const packs = listInstalled();
+          let active = DACHSHUND_SLUG;
+          try { active = String(readConfigObject().activePet || DACHSHUND_SLUG); } catch {}
+          const list = [DACHSHUND_SLUG, ...packs]
+            .map((s) => `• ${s}${s === active ? "  ← active" : ""}`)
+            .join("\n");
+          return `Installed pets:\n${list}`;
+        }
+        case "remove": {
+          if (!SLUG_RE.test(slug) || slug.toLowerCase() === DACHSHUND_SLUG) {
+            return `Provide an installed pet slug to remove (the built-in dachshund can't be removed).`;
+          }
+          if (!listInstalled().includes(slug)) return `"${slug}" isn't installed.`;
+          fs.rmSync(path.join(petsDir, slug), { recursive: true, force: true });
+          // If it was active, fall back to the built-in dog so the pet keeps rendering.
+          try {
+            if (String(readConfigObject().activePet || "") === slug) writeConfigKey("activePet", DACHSHUND_SLUG);
+          } catch {}
+          return `Removed "${slug}".`;
+        }
+        default:
+          return `Unknown action "${action}".`;
+      }
+    } catch (e) {
+      return `pet_gallery ${action} failed: ${e.message}`;
+    }
+  },
+};
+
 const session = await joinSession({
-  tools: [petControl],
+  tools: [petControl, petGallery],
   hooks: {
     onSessionStart: async (input) => {
       // Greet once per process; never on a resume (which fires repeatedly).

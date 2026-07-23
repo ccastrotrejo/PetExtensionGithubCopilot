@@ -156,6 +156,37 @@ The renderer owns transient/auto transitions so the controller only sends discre
 - a new winning `(id, activity)` → wake + adopt that session's mood
 - winner `mood: "quit"` → `NSApp.terminate`; winner `mood: "hidden"` → `orderOut`
 
+## Petdex packs (spritesheet pets)
+
+The flagship dachshund is code-drawn, but the pet can also render **installed
+[Petdex](https://petdex.dev) packs** — community pets in a portable
+`pet.json` + spritesheet format (see [`petdex.md`](petdex.md) for the full story).
+This is the ecosystem work from issues #9/#10.
+
+- **Format & mapping are pure.** `SpriteSheet` (grid geometry + `frameIndex` /
+  `frameRect`), `PetdexState` + `Mood.petdexState` (our moods → the sheet's
+  animation rows), and `PetPackInfo` (`pet.json` parsing) all live in
+  `PetCore.swift` and are unit-tested — no image decode needed. The invariant is
+  the **192×208 frame size**, so sheets with different row counts (8×9, 8×11, …)
+  all slice correctly.
+- **`config.activePet`** selects the pet: `"dachshund"` (default flagship) or an
+  installed slug loaded from `~/.copilot-pet/pets/<slug>/`. `loadConfig` reloads
+  the pack only when the slug changes (`syncActivePack`); a failed load falls
+  back to the dog. The window resizes to the pack's frame aspect
+  (`PetMetrics.windowSize`).
+- **Rendering** (`PetView.drawSpritePack`): the mood picks the sheet **row**
+  (state), the animation clock picks the **column** (frame, 6 fps); Reduce Motion
+  freezes on the first frame. Spritesheets decode via ImageIO (`CGImageSource` —
+  native WebP/PNG on macOS 11+); frames are cropped on demand. The dog-only
+  touches (three facings, cursor gaze, idle antics) are skipped for packs.
+- **Consume** flow lives in the controller: `extension.mjs` adds a `pet_gallery`
+  tool (browse the cached public manifest, install a pack into the pets dir,
+  `use`/`remove` via a merge-write of `config.json`).
+- **Contribute:** `pet --export <dir>` renders the dachshund headlessly into a
+  1536×1872 Petdex spritesheet + `pet.json` (`PetExport`), driven by
+  `tools/export-dachshund.sh`; the committed result is
+  `assets/petdex/copilot-dachshund/`.
+
 ## The overlay window
 
 ```swift
@@ -226,5 +257,6 @@ with a tail, and a soft ground shadow.
 
 - **macOS only** (AppKit).
 - Uses **`NSScreen.main`** only — no multi-monitor spanning.
-- Pixel-art sprite is code-drawn (no image assets); tuning the art means editing cell coordinates.
+- The flagship dachshund is code-drawn (no image assets); tuning its art means editing cell coordinates. Installed [Petdex packs](petdex.md), by contrast, are image spritesheets.
 - Requires `swiftc` for the one-time compile.
+- Submitting our exported pet to the Petdex gallery is an interactive step (`npx petdex submit`, OAuth login) — the export is automated, the submission is not.

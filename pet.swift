@@ -6,6 +6,7 @@
 // state.json: { "mood": String, "message": String, "seq": Int, "heartbeat": Double(ms) }
 
 import Cocoa
+import ImageIO
 
 // The pure model (Mood, Pose, DogFeatures, Accessory, EyeState, MouthState)
 // lives in PetCore.swift and is compiled into the same module.
@@ -33,10 +34,90 @@ final class PetState {
     var anticStart: Double = 0        // phase clock when the current antic began
     var nextAntic: Double = 0         // phase clock at which the next antic fires (0 = disarmed)
     var gaze: Gaze = .none            // cursor-watching state this tick (nil-object when not near)
+    // Installed Petdex pack currently being rendered (nil = the flagship dog).
+    // Loaded lazily by loadConfig when `activePet` names a pack, and reloaded
+    // only when the slug changes. `activePackSlug` records what `activePack`
+    // reflects — including "" after a failed load, so we don't retry every tick.
+    var activePack: LoadedPack? = nil
+    var activePackSlug: String = PetConfig.dachshundSlug
 
     init(statePath: String) {
         self.statePath = statePath
         self.sessionsDir = (statePath as NSString).deletingLastPathComponent + "/sessions"
+    }
+}
+
+// MARK: - Petdex pack loading & display metrics
+
+/// Where installed Petdex packs live: `~/.copilot-pet/pets/<slug>/`. The Node
+/// controller (extension.mjs) writes installs to the same path.
+func petsRootDir() -> String {
+    (NSHomeDirectory() as NSString).appendingPathComponent(".copilot-pet/pets")
+}
+
+/// A decoded Petdex pet ready to render: its parsed `pet.json`, the decoded
+/// spritesheet, and the derived grid geometry. Frames are cropped on demand
+/// (CGImage.cropping is a cheap view onto the parent), so no per-frame cache.
+final class LoadedPack {
+    let slug: String
+    let info: PetPackInfo
+    let sheet: SpriteSheet
+    let image: CGImage
+
+    private init(slug: String, info: PetPackInfo, sheet: SpriteSheet, image: CGImage) {
+        self.slug = slug; self.info = info; self.sheet = sheet; self.image = image
+    }
+
+    /// Load `~/.copilot-pet/pets/<slug>/` — `pet.json` + its spritesheet. Returns
+    /// nil on any problem (missing files, undecodable image, indivisible grid) so
+    /// the caller can fall back to the flagship dog.
+    static func load(slug: String, root: String = petsRootDir()) -> LoadedPack? {
+        let dir = (root as NSString).appendingPathComponent(slug)
+        let jsonPath = (dir as NSString).appendingPathComponent("pet.json")
+        let obj = (try? Data(contentsOf: URL(fileURLWithPath: jsonPath)))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? nil
+        guard let info = PetPackInfo.parse(obj, slug: slug) else { return nil }
+
+        // Resolve the spritesheet: honor pet.json's path, but if it's missing or
+        // absent fall back to the conventional file names in the pack dir.
+        let candidates = [info.spritesheetPath, "spritesheet.webp", "spritesheet.png"]
+        var image: CGImage? = nil
+        for name in candidates {
+            let p = (dir as NSString).appendingPathComponent((name as NSString).lastPathComponent)
+            guard FileManager.default.fileExists(atPath: p),
+                  let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: p) as CFURL, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { continue }
+            image = img; break
+        }
+        guard let img = image,
+              let sheet = SpriteSheet.from(imageWidth: img.width, imageHeight: img.height)
+        else { return nil }
+        return LoadedPack(slug: slug, info: info, sheet: sheet, image: img)
+    }
+}
+
+/// On-screen sizing for pets. The flagship dog keeps its long-standing footprint;
+/// a spritesheet pet is scaled from its native 192×208 frame so its height is
+/// comparable to the dog at the same `size`, then the window is padded to leave
+/// headroom for the speech bubble.
+enum PetMetrics {
+    /// Displayed size of one spritesheet frame at `petSize`, preserving the
+    /// frame's aspect ratio. Height tracks `size` (like the dog) so switching
+    /// pets doesn't jump scale.
+    static func spriteDisplaySize(petSize: CGFloat, sheet: SpriteSheet) -> CGSize {
+        let h = (petSize * 2.2).rounded()
+        let w = (h * CGFloat(sheet.frameW) / CGFloat(sheet.frameH)).rounded()
+        return CGSize(width: w, height: h)
+    }
+
+    /// Window size for the current pet: the dog uses the classic footprint; a
+    /// pack sizes to its scaled frame plus bubble headroom.
+    static func windowSize(config: PetConfig, pack: LoadedPack?) -> CGSize {
+        if let pack = pack, !config.usesDachshund {
+            let d = spriteDisplaySize(petSize: config.size, sheet: pack.sheet)
+            return CGSize(width: max(200, d.width + 80), height: max(170, d.height + 52))
+        }
+        return dogWindowSize(for: config.size)
     }
 }
 
@@ -272,7 +353,7 @@ final class PetView: NSView {
         // under Reduce Motion, and only runs in calm idle (a real mood or a
         // playing antic keeps priority). Recomputed every visible tick.
         state.gaze = .none
-        if visible, state.config.lookAround, !reduceMotionEnabled,
+        if visible, state.config.usesDachshund, state.config.lookAround, !reduceMotionEnabled,
            state.mood == .idle, state.antic == nil {
             let g = cursorGaze()
             if g.active {
@@ -286,7 +367,9 @@ final class PetView: NSView {
         // Reduce Motion (OS or config) — a still/hidden/occluded pet keeps
         // facing you; it's the most conspicuous "non-essential" motion. Skipped
         // while actively watching the cursor, so gaze isn't fought by a glance.
-        if visible, state.config.lookAround, !reduceMotionEnabled, !state.gaze.active, now >= state.nextTurn {
+        // Facing is dog-only — a Petdex sheet is forward-facing, so packs skip it.
+        if visible, state.config.usesDachshund, state.config.lookAround, !reduceMotionEnabled,
+           !state.gaze.active, now >= state.nextTurn {
             if state.nextTurn != 0 {
                 state.facing = Facing.turn(from: state.facing, random: Double.random(in: 0..<1))
             }
@@ -384,8 +467,16 @@ final class PetView: NSView {
         }
 
         let oldSize = state.config.size
+        let oldActivePet = state.config.activePet
         state.config = newConfig
         if !newConfig.lookAround { state.facing = .front }   // stop mid-glance
+        // Swap the active pet if `activePet` changed (dog ↔ pack, or pack ↔ pack).
+        // Resolve the pack here so the window can resize to its aspect; a failed
+        // load falls back to the dog. Compares against activePackSlug (which
+        // records failures too) so a broken slug isn't retried every reload.
+        if newConfig.activePet != oldActivePet || newConfig.activePet != state.activePackSlug {
+            syncActivePack()
+        }
         if newConfig.size != oldSize { resizeWindow() }
         if newConfig.palette != coatPalette {                // rebuild coat only on change
             coatPalette = newConfig.palette
@@ -395,12 +486,32 @@ final class PetView: NSView {
         needsDisplay = true
     }
 
-    // Grow/shrink the window to fit the configured pet size. The pet is drawn
-    // bottom-centered, so we keep the bottom edge and horizontal center fixed
-    // (grow symmetrically about the center) so it doesn't jump when resized.
+    /// Reconcile `state.activePack` with `config.activePet`, loading or clearing
+    /// the pack as needed and resizing the window to fit. Called on any change to
+    /// `activePet`. A load failure leaves `activePack == nil` (→ the dog renders)
+    /// but still records the slug so we don't retry every tick.
+    func syncActivePack() {
+        let cfg = state.config
+        if cfg.usesDachshund {
+            let changed = state.activePack != nil
+            state.activePack = nil
+            state.activePackSlug = PetConfig.dachshundSlug
+            if changed { resizeWindow() }
+            return
+        }
+        if state.activePack?.slug == cfg.activePet { return }   // already loaded
+        state.activePack = LoadedPack.load(slug: cfg.activePet)
+        state.activePackSlug = cfg.activePet                    // records failures too
+        resizeWindow()
+    }
+
+    // Grow/shrink the window to fit the active pet (the dog's classic footprint,
+    // or a spritesheet pack's scaled frame). The pet is drawn bottom-centered, so
+    // we keep the bottom edge and horizontal center fixed (grow symmetrically
+    // about the center) so it doesn't jump when resized.
     private func resizeWindow() {
         guard let win = self.window else { return }
-        let newSize = windowSize(for: petSize)
+        let newSize = PetMetrics.windowSize(config: state.config, pack: state.activePack)
         var frame = win.frame
         frame.origin.x -= (newSize.width - frame.size.width) / 2   // keep center
         frame.size = newSize
@@ -466,6 +577,15 @@ final class PetView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.clear(bounds)
+
+        // Installed Petdex pack → render a spritesheet frame instead of the
+        // code-drawn dog. The dog remains the flagship/default (activePet
+        // "dachshund"); packs are opt-in and fall back to the dog on any load
+        // failure (state.activePack stays nil).
+        if let pack = state.activePack, !state.config.usesDachshund {
+            drawSpritePack(pack, ctx: ctx)
+            return
+        }
 
         let W = bounds.width
         let phase = state.phase
@@ -544,6 +664,78 @@ final class PetView: NSView {
             let name = state.config.name
             let shown = (state.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
             drawBubble(shown, petCenterX: cx, baseY: cy + petSize * 0.55 + 12, maxWidth: W)
+        }
+    }
+
+    // MARK: Petdex spritesheet renderer
+
+    /// Render one frame of an installed Petdex pack. The mood picks the sheet row
+    /// (state), the animation clock picks the column (frame); Reduce Motion (OS or
+    /// config) freezes on the first frame. Drawn bottom-centered on the same
+    /// ground line as the dog, with the same speech-bubble rules. Facing, gaze,
+    /// antics and accessories don't apply — a Petdex sheet is a fixed,
+    /// forward-facing animation set, so its own frames carry the expression.
+    private func drawSpritePack(_ pack: LoadedPack, ctx: CGContext) {
+        let W = bounds.width
+        let pdState = state.mood.petdexState
+        let col = pack.sheet.frameIndex(phase: state.phase, frozen: reduceMotionEnabled)
+        guard let frame = pack.image.cropping(to: pack.sheet.frameRect(state: pdState, col: col)) else { return }
+
+        let disp = PetMetrics.spriteDisplaySize(petSize: petSize, sheet: pack.sheet)
+        let x = ((W - disp.width) / 2).rounded()
+        let y = groundY.rounded()
+        ctx.saveGState()
+        ctx.interpolationQuality = .none   // pixel-art sheets: keep frames crisp
+        ctx.draw(frame, in: CGRect(x: x, y: y, width: disp.width, height: disp.height))
+        ctx.restoreGState()
+
+        // Speech bubble — same rules as the dog. Pose.make is reused purely for
+        // its bubble text so greet/worried/nudge messages read identically; its
+        // motion fields are ignored here.
+        guard state.config.bubblesEnabled else { return }
+        let pose = Pose.make(for: state.mood, phase: state.phase, message: state.message,
+                             reduceMotion: reduceMotionEnabled, antic: nil, anticPhase: 0)
+        if let text = pose.bubble, !text.isEmpty {
+            let name = state.config.name
+            let shown = (state.mood == .greet && !name.isEmpty) ? "hi, I'm \(name)!" : text
+            drawBubble(shown, petCenterX: (W / 2).rounded(), baseY: y + disp.height + 10, maxWidth: W)
+        }
+    }
+
+    // MARK: Petdex export (contribute)
+
+    /// Draw the dachshund centered in a single Petdex frame, for the spritesheet
+    /// exporter. Reuses the exact body/head art (drawDachshund*) plus the mood
+    /// accessory so each exported state reads (gear = run, sweat = failed, …), but
+    /// omits the window-only shadow, bubble and gaze. Draws into the *current*
+    /// NSGraphicsContext, which the exporter points at a per-frame bitmap.
+    func drawExportDog(frameW: Int, frameH: Int, size s: CGFloat, mood: Mood, facing: Facing, phase: Double) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let pose = Pose.make(for: mood, phase: phase, message: "", reduceMotion: false,
+                             antic: nil, anticPhase: 0)
+        let cx = (CGFloat(frameW) / 2).rounded()
+        let cy = (CGFloat(frameH) * 0.46 + pose.bob).rounded()
+
+        ctx.saveGState()
+        ctx.setShouldAntialias(false)
+        ctx.translateBy(x: cx, y: cy)
+        ctx.scaleBy(x: (facing == .left ? -1 : 1) * pose.scaleX, y: pose.scaleY)
+        if facing == .front {
+            drawDachshundFront(size: s, pose: pose, phase: phase)
+        } else {
+            drawDachshundPixel(size: s, pose: pose, phase: phase)
+        }
+        ctx.restoreGState()
+
+        // Mood accessory beside the head (front placement mirrors draw()).
+        if let acc = pose.accessory {
+            ctx.saveGState()
+            ctx.setShouldAntialias(false)
+            let accBob = sin(phase * 4) * 3 * pose.motionScale
+            let ax = (cx + s * 0.44).rounded()
+            let ay = (cy + s * 0.55 + accBob).rounded()
+            drawAccessory(acc, at: CGPoint(x: ax, y: ay), phase: phase, motionScale: pose.motionScale)
+            ctx.restoreGState()
         }
     }
 
@@ -899,11 +1091,131 @@ func writePos(_ o: CGPoint, _ path: String) {
     try? "\(o.x),\(o.y)".write(toFile: path, atomically: true, encoding: .utf8)
 }
 
-/// Window dimensions sized to fit the pet (config `size`), with a floor that
-/// keeps speech bubbles readable for small pets.
-func windowSize(for petSize: CGFloat) -> CGSize {
+/// Window dimensions sized to fit the flagship dog (config `size`), with a floor
+/// that keeps speech bubbles readable for small pets. Petdex packs size
+/// differently — see `PetMetrics.windowSize`.
+func dogWindowSize(for petSize: CGFloat) -> CGSize {
     CGSize(width: max(200, (petSize * 3.3).rounded()),
            height: max(170, (petSize * 2.8).rounded()))
+}
+
+// MARK: - Petdex export (contribute)
+//
+// Renders the flagship dachshund into a Petdex-format pet pack so it can be
+// submitted to the gallery (`npx petdex submit`). The output is a canonical
+// 8×9 grid of 192×208 frames (1536×1872) plus a `pet.json`. Each of the eight
+// animation states is one row; its eight columns are one loop of that state.
+
+enum PetExport {
+    static let frameW = 192
+    static let frameH = 208
+    static let cols = SpriteSheet.defaultCols   // 8 frames per state
+    static let rows = SpriteSheet.defaultRows   // 9 grid rows (row 8 is a spare)
+    // Pet size tuned so the dog + its head accessory sit comfortably inside a
+    // 192-wide frame with headroom for the jump/bob.
+    static let petSize: CGFloat = 74
+
+    /// Our mood + facing for each Petdex state row, chosen so the exported sheet
+    /// is as expressive as the live pet: greeting waves, working runs (side-on so
+    /// the legs read), failures sweat, thinking shows the thought cloud, and the
+    /// two celebratory spares sparkle / doze.
+    static let stateMap: [(PetdexState, Mood, Facing)] = [
+        (.idle,   .idle,      .front),
+        (.wave,   .greet,     .front),
+        (.run,    .working,   .right),
+        (.failed, .worried,   .front),
+        (.review, .thinking,  .front),
+        (.jump,   .happy,     .front),
+        (.extra1, .celebrate, .front),
+        (.extra2, .sleeping,  .front),
+    ]
+
+    /// Render the pack into `outDir` (created if needed). Returns false on any I/O
+    /// or rendering failure, with a message on stderr.
+    static func run(outDir: String) -> Bool {
+        // AppKit needs a shared application instance before NSView/NSColor drawing
+        // is safe, even headless. We never call run(), so no window/dock appears.
+        _ = NSApplication.shared
+
+        let fm = FileManager.default
+        do { try fm.createDirectory(atPath: outDir, withIntermediateDirectories: true) }
+        catch { return fail("cannot create \(outDir): \(error.localizedDescription)") }
+
+        let sheetW = cols * frameW           // 1536
+        let sheetH = rows * frameH           // 1872
+        guard let sheet = CGContext(data: nil, width: sheetW, height: sheetH,
+                                    bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return fail("cannot create sheet context") }
+
+        // A detached view supplies the dog art; its size is our export size.
+        let state = PetState(statePath: "")
+        state.config.size = petSize
+        let view = PetView(frame: CGRect(x: 0, y: 0, width: frameW, height: frameH), state: state)
+
+        for (pdState, mood, facing) in stateMap {
+            for col in 0..<cols {
+                // 6fps clock so consecutive columns are one loop step apart.
+                let phase = Double(col) / SpriteSheet.defaultFPS
+                guard let frame = renderFrame(view: view, mood: mood, facing: facing, phase: phase)
+                else { return fail("failed to render \(pdState.rawValue) frame \(col)") }
+                // Row 0 is the top band; CGContext origin is bottom-left.
+                let x = col * frameW
+                let y = (rows - 1 - pdState.row) * frameH
+                sheet.draw(frame, in: CGRect(x: x, y: y, width: frameW, height: frameH))
+            }
+        }
+
+        guard let sheetImage = sheet.makeImage() else { return fail("cannot finalize sheet") }
+        let sheetPath = (outDir as NSString).appendingPathComponent("spritesheet.png")
+        guard writePNG(sheetImage, to: sheetPath) else { return fail("cannot write \(sheetPath)") }
+
+        // Minimal, format-compliant pet.json (see docs/petdex.md).
+        let meta: [String: Any] = [
+            "id": "copilot-dachshund",
+            "displayName": "Copilot Dachshund",
+            "description": "The GitHub Copilot CLI companion — a chibi pixel-art dachshund that reacts to your coding agent's activity.",
+            "spritesheetPath": "spritesheet.png",
+        ]
+        let jsonPath = (outDir as NSString).appendingPathComponent("pet.json")
+        guard let data = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]),
+              (try? data.write(to: URL(fileURLWithPath: jsonPath))) != nil
+        else { return fail("cannot write \(jsonPath)") }
+
+        FileHandle.standardOutput.write(
+            "exported Copilot Dachshund → \(outDir) (\(sheetW)×\(sheetH))\n".data(using: .utf8)!)
+        return true
+    }
+
+    /// Render one frame into a fresh 192×208 bitmap and return it as a CGImage.
+    private static func renderFrame(view: PetView, mood: Mood, facing: Facing, phase: Double) -> CGImage? {
+        guard let cg = CGContext(data: nil, width: frameW, height: frameH,
+                                 bitsPerComponent: 8, bytesPerRow: 0,
+                                 space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let ns = NSGraphicsContext(cgContext: cg, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = ns
+        view.drawExportDog(frameW: frameW, frameH: frameH, size: petSize,
+                           mood: mood, facing: facing, phase: phase)
+        NSGraphicsContext.restoreGraphicsState()
+        return cg.makeImage()
+    }
+
+    private static func writePNG(_ image: CGImage, to path: String) -> Bool {
+        guard let dest = CGImageDestinationCreateWithURL(
+            URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil) else { return false }
+        CGImageDestinationAddImage(dest, image, nil)
+        return CGImageDestinationFinalize(dest)
+    }
+
+    @discardableResult
+    private static func fail(_ msg: String) -> Bool {
+        FileHandle.standardError.write("export: \(msg)\n".data(using: .utf8)!)
+        return false
+    }
 }
 
 // MARK: - App bootstrap
@@ -911,8 +1223,17 @@ func windowSize(for petSize: CGFloat) -> CGSize {
 @main
 enum PetApp {
     static func main() {
+        // Contribute path: `pet --export <outdir>` renders the flagship dachshund
+        // to a Petdex-format pet pack (1536×1872 spritesheet + pet.json) and
+        // exits, without opening a window. Used by tools/export-dachshund.sh to
+        // produce a submittable Petdex pet (see docs/petdex.md).
+        if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "--export" {
+            let out = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2] : "."
+            exit(PetExport.run(outDir: out) ? 0 : 1)
+        }
+
         guard CommandLine.arguments.count >= 2 else {
-            FileHandle.standardError.write("usage: pet <state.json>\n".data(using: .utf8)!)
+            FileHandle.standardError.write("usage: pet <state.json> | pet --export <outdir>\n".data(using: .utf8)!)
             exit(2)
         }
         let statePath = CommandLine.arguments[1]
@@ -943,7 +1264,15 @@ enum PetApp {
             state.configMTime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
         }
 
-        let winSize = windowSize(for: state.config.size)
+        // If an installed Petdex pack is active, load it now so the initial
+        // window is sized to the spritesheet (not the dog). A failed load leaves
+        // activePack nil → the dog renders at its usual size.
+        if !state.config.usesDachshund {
+            state.activePack = LoadedPack.load(slug: state.config.activePet)
+            state.activePackSlug = state.config.activePet
+        }
+
+        let winSize = PetMetrics.windowSize(config: state.config, pack: state.activePack)
         var origin = CGPoint(x: 200, y: 200)
         if let screen = NSScreen.main {
             let vf = screen.visibleFrame
