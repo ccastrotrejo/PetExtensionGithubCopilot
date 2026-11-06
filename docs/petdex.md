@@ -103,6 +103,44 @@ npx petdex submit assets/petdex/copilot-dachshund
 
 (You'll be prompted to `petdex login` in a browser the first time.)
 
+## Dot Lab — design your own Dot
+
+`tools/dot-lab/` is a dev-only generator for plush, faux-fur companions in the style
+of CopilotKit's [OpenDots](https://www.copilotkit.ai/opendots) mascots. It's a lab, not
+part of the pet: nothing in `extension.mjs` or the Swift code imports it. What ships is
+the **exported Petdex pack**, which the existing loader plays like any gallery pet.
+
+```sh
+node tools/dot-lab/serve.mjs        # → http://127.0.0.1:5178/  (localhost only)
+```
+
+- **Click the canvas** for a new Dot. Every unlocked knob is rerolled from a fresh seed.
+  **Shift-click** changes only the seed, so you get new fur with the same design.
+- The preview plays at the pet's fixed **6 fps** (`SpriteSheet.defaultFPS`), so what you
+  see is what the desktop pet plays. Active states use keyed poses with big per-frame
+  changes, because smooth curves read as floaty at that rate.
+- **Knobs** cover silhouette (`round`, `bean`, `pear`, `star`, `drop`, `cloud`), colour,
+  size, fur, shading, limbs, face, prop (`headphones`, `pocket`, `scarf`, `sprout`,
+  `beanie`, `glasses`, `bowtie`, `none`) and motion. 🔒 locks a knob against rerolls.
+  Every knob combination is auto-fit to stay inside the 192×208 frame.
+- **Save** writes the full config, seed included, to `tools/dot-lab/configs/<name>.json`
+  and copies it to the clipboard. The rail below the canvas re-applies saved configs.
+- **Export pack** renders the 1536×1872 spritesheet (8 states × 8 frames + an idle row)
+  to `assets/petdex/copilot-dot-<name>/`, along with `pet.json` and the source
+  `dot-config.json`.
+- **Install** copies the exported pack to `~/.copilot-pet/pets/copilot-dot-<name>/`. It
+  also sets `activePet` if the installed extension's config directory exists. Otherwise,
+  switch with `pet_gallery use copilot-dot-<name>`.
+
+Rendering is a pure function of the config. `render(config)` draws only from a seeded
+`mulberry32` PRNG, so a saved config always reproduces the exact Dot. The style's
+fixed rules (one body hue, fur instead of outlines, tiny face high on the body, one
+role prop, squash-and-bob motion) live in `body.js` and `face.js`. The state
+animations live in `dot.js`.
+
+A Dot is a spritesheet pet, so it has the same limits as gallery pets: no cursor gaze,
+facings, or idle antics.
+
 ## Where things live
 
 | Path | Purpose |
@@ -111,3 +149,6 @@ npx petdex submit assets/petdex/copilot-dachshund
 | `$TMPDIR/copilot-pet/petdex-manifest.json` | Cached gallery manifest (6-hour TTL). |
 | `assets/petdex/copilot-dachshund/` | Our exported, submittable Petdex pet. |
 | `tools/export-dachshund.sh` | Regenerates the export and prints the submit command. |
+| `tools/dot-lab/` | Dot Lab generator (`serve.mjs`, `dot.js` renderer, `index.html`/`lab.js` UI). |
+| `tools/dot-lab/configs/` | Saved Dot configs (the source of truth for a Dot). |
+| `assets/petdex/copilot-dot-<name>/` | Exported Dot packs (`spritesheet.png`, `pet.json`, `dot-config.json`). |
