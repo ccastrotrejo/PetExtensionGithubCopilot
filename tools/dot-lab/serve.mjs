@@ -59,6 +59,21 @@ function checkSlug(s) {
   return s;
 }
 
+// Writes must come from the lab itself. Cross-site pages can't send application/json
+// without a CORS preflight (never answered here), and the Host check blocks DNS rebinding.
+function isTrusted(req) {
+  const host = req.headers.host || "";
+  if (!/^(127\.0\.0\.1|localhost):\d+$/.test(host)) return false;
+  if (req.method !== "POST") return true;
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://${host}`) return false;
+  return (req.headers["content-type"] || "").startsWith("application/json");
+}
+
+function readSavedConfig(file) {
+  try { return JSON.parse(fs.readFileSync(path.join(configsDir, file), "utf8")); } catch { return null; }
+}
+
 const routes = {
   "GET /api/configs": () => {
     let files = [];
@@ -66,7 +81,8 @@ const routes = {
     const configs = files
       .map((f) => ({ f, t: fs.statSync(path.join(configsDir, f)).mtimeMs }))
       .sort((a, b) => b.t - a.t)
-      .map(({ f }) => ({ name: f.slice(0, -5), config: JSON.parse(fs.readFileSync(path.join(configsDir, f), "utf8")) }));
+      .map(({ f }) => ({ name: f.slice(0, -5), config: readSavedConfig(f) }))
+      .filter((s) => s.config && typeof s.config === "object");
     return { configs };
   },
   "POST /api/save": ({ name, config }) => {
@@ -97,10 +113,12 @@ const routes = {
     const src = path.join(packsDir, slug);
     if (!fs.existsSync(path.join(src, "pet.json"))) throw new Error(`no exported pack at ${rel(src)}`);
     const dest = path.join(petsDir, slug);
-    fs.mkdirSync(petsDir, { recursive: true });
+    const staging = `${dest}.tmp-${process.pid}`;
+    fs.rmSync(staging, { recursive: true, force: true });
+    fs.mkdirSync(staging, { recursive: true });
+    for (const f of ["pet.json", "spritesheet.png"]) fs.copyFileSync(path.join(src, f), path.join(staging, f));
     fs.rmSync(dest, { recursive: true, force: true });
-    fs.mkdirSync(dest);
-    for (const f of ["pet.json", "spritesheet.png"]) fs.copyFileSync(path.join(src, f), path.join(dest, f));
+    fs.renameSync(staging, dest);
     if (fs.existsSync(path.dirname(extConfig))) {
       let cfg = {};
       if (fs.existsSync(extConfig)) cfg = JSON.parse(fs.readFileSync(extConfig, "utf8")) || {};
@@ -119,6 +137,7 @@ const server = http.createServer(async (req, res) => {
     res.end(type === "application/json" ? JSON.stringify(body) : body);
   };
   const route = routes[`${req.method} ${url.pathname}`];
+  if (!isTrusted(req)) return send(403, { error: "forbidden" });
   if (route) {
     try { send(200, route(req.method === "POST" ? await readBody(req) : {})); }
     catch (e) { send(400, { error: e.message }); }
@@ -130,4 +149,4 @@ const server = http.createServer(async (req, res) => {
   send(200, fs.readFileSync(file), TYPES[path.extname(file)] || "application/octet-stream");
 });
 
-server.listen(port, "127.0.0.1", () => console.log(`Dot Lab → http://127.0.0.1:${port}/`));
+server.listen(port, "127.0.0.1", () => console.log(`Dot Lab → http://127.0.0.1:${server.address().port}/`));

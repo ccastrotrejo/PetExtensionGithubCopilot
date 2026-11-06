@@ -2,13 +2,11 @@
 import { KNOBS, MODES, STATES, STATE_LABELS, DEFAULTS, FRAME_W, FRAME_H, normalize, reroll, renderFrame, renderSheet } from "./dot.js";
 
 const $ = (s) => document.querySelector(s);
-const LOCAL_KEY = "dot-lab.saved";
 let config = normalize(JSON.parse(localStorage.getItem("dot-lab.current") || "null") || DEFAULTS);
 let locked = new Set(JSON.parse(localStorage.getItem("dot-lab.locked") || "[]"));
 let previewState = "idle";
 let frame = 0;
 let lastExport = null;
-const hasServer = location.protocol.startsWith("http");
 
 // --- Panel ---------------------------------------------------------------
 const tabs = $("#tabs");
@@ -30,7 +28,7 @@ for (const k of KNOBS) {
   }
   const row = document.createElement("div");
   row.className = "row";
-  const lock = Object.assign(document.createElement("button"), { className: "lock", textContent: "🔒" });
+  const lock = Object.assign(document.createElement("button"), { className: "lock" });
   lock.dataset.key = k.key;
   lock.setAttribute("aria-label", `Lock ${k.label}`);
   const label = Object.assign(document.createElement("label"), { textContent: k.label, htmlFor: `k-${k.key}` });
@@ -69,7 +67,11 @@ function syncPanel() {
     if (out) out.textContent = Number(config[k.key]).toFixed(k.step < 1 ? (k.step < 0.05 ? 3 : 2) : 0);
     row.classList.toggle("off", !!k.modes && !k.modes.includes(config.mode));
   }
-  document.querySelectorAll(".lock").forEach((b) => b.setAttribute("aria-pressed", String(locked.has(b.dataset.key))));
+  document.querySelectorAll(".lock").forEach((b) => {
+    const on = locked.has(b.dataset.key);
+    b.setAttribute("aria-pressed", String(on));
+    b.textContent = on ? "🔒" : "🔓";
+  });
   $("#seed").value = config.seed;
   if (!$("#name").dataset.touched) $("#name").value = `${config.mode}-${config.seed}`;
 }
@@ -127,82 +129,67 @@ $("#reroll").onclick = () => set(reroll(config, (Math.random() * 2 ** 32) >>> 0,
 $("#seed").onchange = (e) => set({ seed: Number(e.target.value) >>> 0 });
 $("#name").oninput = (e) => { e.target.dataset.touched = "1"; };
 
-// --- Save / rail / export ------------------------------------------------
-const status = (msg) => { $("#status").textContent = msg; };
+// --- Save / rail / export (needs serve.mjs) ------------------------------
+const setStatus = (msg) => { $("#status").textContent = msg; };
 const slug = () => ($("#name").value || `${config.mode}-${config.seed}`).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "dot";
 
 async function api(path, body) {
   const res = await fetch(path, { method: body ? "POST" : "GET", headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
-  const json = await res.json();
+  const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || res.statusText);
   return json;
 }
 
-async function loadSaved() {
-  if (hasServer) { try { return (await api("/api/configs")).configs; } catch {} }
-  return JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]");
-}
-
 async function renderRail() {
   const rail = $("#rail");
+  let saved = [];
+  try { saved = (await api("/api/configs")).configs; } catch (err) { setStatus(`Couldn't load saved configs: ${err.message}`); }
   rail.replaceChildren();
-  for (const { name, config: saved } of await loadSaved()) {
+  for (const { name, config: c } of saved) {
     const b = document.createElement("button");
     const cv = Object.assign(document.createElement("canvas"), { width: 96, height: 104 });
-    renderFrame(cv.getContext("2d"), saved, "idle", 0, 0.5, 3);
+    renderFrame(cv.getContext("2d"), c, "idle", 0, 0.5, 3);
     b.append(cv, name);
     b.title = `Apply ${name}`;
-    b.onclick = () => { $("#name").value = name; $("#name").dataset.touched = "1"; set(saved); status(`Applied ${name}`); };
+    b.onclick = () => { $("#name").value = name; $("#name").dataset.touched = "1"; set(c); setStatus(`Applied ${name}`); };
     rail.append(b);
   }
 }
 
 $("#save").onclick = async () => {
-  const name = slug();
-  const json = JSON.stringify(config, null, 2);
-  try { await navigator.clipboard.writeText(json); } catch {}
+  try { await navigator.clipboard.writeText(JSON.stringify(config, null, 2)); } catch {}
   try {
-    if (!hasServer) throw new Error("no server");
-    const { path } = await api("/api/save", { name, config });
-    status(`Saved → ${path} (+ clipboard)`);
-  } catch {
-    const list = (JSON.parse(localStorage.getItem(LOCAL_KEY) || "[]")).filter((s) => s.name !== name);
-    localStorage.setItem(LOCAL_KEY, JSON.stringify([{ name, config }, ...list]));
-    status(`Saved ${name} to browser storage + clipboard (run serve.mjs to write files)`);
+    const { path } = await api("/api/save", { name: slug(), config });
+    setStatus(`Saved → ${path} (+ clipboard)`);
+    renderRail();
+  } catch (err) {
+    setStatus(`Save failed: ${err.message} (is serve.mjs running?)`);
   }
-  renderRail();
 };
 
 $("#export").onclick = async (e) => {
   const btn = e.currentTarget;
   btn.disabled = true;
-  status("Rendering 1536×1872 spritesheet…");
+  setStatus("Rendering 1536×1872 spritesheet…");
   await new Promise((r) => setTimeout(r, 30));
   try {
-    const sheet = renderSheet(config, 2);
-    const png = sheet.toDataURL("image/png");
-    if (!hasServer) {
-      Object.assign(document.createElement("a"), { href: png, download: `copilot-dot-${slug()}.png` }).click();
-      status("Downloaded spritesheet (run serve.mjs to write a full pack)");
-      return;
-    }
+    const png = renderSheet(config, 2).toDataURL("image/png");
     const res = await api("/api/export", { name: slug(), config, png });
     lastExport = res.slug;
-    status(`Exported → ${res.path} (${res.dims})`);
+    setStatus(`Exported → ${res.path} (${res.dims})`);
   } catch (err) {
-    status(`Export failed: ${err.message}`);
+    setStatus(`Export failed: ${err.message}`);
   } finally {
     btn.disabled = false;
   }
 };
 
 $("#install").onclick = async () => {
-  if (!hasServer) return status("Install needs serve.mjs");
   try {
     const res = await api("/api/install", { slug: lastExport || `copilot-dot-${slug()}` });
-    status(res.message);
+    setStatus(res.message);
   } catch (err) {
-    status(`Install failed: ${err.message} — export first`);
+    setStatus(`Install failed: ${err.message} — export first`);
   }
 };
 

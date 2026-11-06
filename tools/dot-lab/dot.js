@@ -4,7 +4,6 @@ import { buildParts, blit, makeCanvas, GROUND_Y } from "./body.js";
 import { drawFace, drawProp, drawEffects } from "./face.js";
 
 export * from "./schema.js";
-export { makeCanvas };
 
 const TAU = Math.PI * 2;
 const PROP_TOP = { headphones: 6, sprout: 30, beanie: 14 };

@@ -94,7 +94,7 @@ export function bodyShape(c) {
   const pts = raw.map(([x, y]) => [CX + ((x - (minX + maxX) / 2) / (maxX - minX)) * c.width, bottomY - ((y - minY) / (maxY - minY)) * c.height]);
   const top = pts.reduce((a, b) => (b[1] < a[1] ? b : a));
   return {
-    pts, nrm: normals(pts), path: polygonPath(pts), cx: CX, topY, bottomY, top,
+    pts, cx: CX, topY, bottomY, top,
     cy: topY + c.height / 2,
     /** [left, right] extent of the silhouette at height y. */
     span(y) {
@@ -114,8 +114,9 @@ export function bodyShape(c) {
 const hsl = (h, s, l, a = 1) => `hsla(${h.toFixed(1)},${s.toFixed(1)}%,${Math.min(96, Math.max(3, l)).toFixed(1)}%,${a})`;
 
 /**
- * Rasterize a furry blob. `pts` is the outline in logical coords; `light` is the
- * key-light point; `dark` darkens the whole blob (limbs sit in the body's shade).
+ * Rasterize a furry blob at `scale`. `pts` is the outline in frame coords; (cx, cy, rx, ry)
+ * is the ellipse the shading is measured against; `dark` darkens the whole blob
+ * (limbs sit in the body's shade).
  */
 function furBlob(c, pts, { cx, cy, rx, ry, dark = 0, seed }, scale) {
   const rng = mulberry32(seed);
@@ -186,20 +187,22 @@ function ellipsePts(cx, cy, rx, ry, n = 96) {
 }
 
 const cache = new Map();
+const CACHE_SIZE = 24;
 
-/** Static parts for a config, cached. Limbs are built around their own origin. */
+/** Static parts for a config, LRU-cached. Limbs are built around their own origin. */
 export function buildParts(c, scale = 3) {
   const key = JSON.stringify(c) + "@" + scale;
-  if (cache.has(key)) return cache.get(key);
+  const hit = cache.get(key);
+  if (hit) { cache.delete(key); cache.set(key, hit); return hit; }
   const shape = bodyShape(c);
   const body = furBlob(c, shape.pts, { cx: shape.cx, cy: shape.cy, rx: c.width / 2, ry: c.height / 2, seed: c.seed }, scale);
   const arx = c.armSize * 0.4, ary = c.armSize * 0.6;
   const arm = furBlob(c, ellipsePts(0, ary * 0.7, arx, ary), { cx: 0, cy: ary * 0.7, rx: arx, ry: ary, dark: 5, seed: c.seed ^ 0xa11 }, scale);
   const frx = c.footSize * 0.72, fry = c.footSize * 0.5;
   const foot = furBlob(c, ellipsePts(0, 0, frx, fry), { cx: 0, cy: 0, rx: frx, ry: fry, dark: 7, seed: c.seed ^ 0xf007 }, scale);
-  const parts = { shape, body, arm, foot, scale };
+  const parts = { shape, body, arm, foot };
   cache.set(key, parts);
-  if (cache.size > 24) cache.delete(cache.keys().next().value);
+  if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value);
   return parts;
 }
 

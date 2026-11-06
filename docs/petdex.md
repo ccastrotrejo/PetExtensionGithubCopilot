@@ -141,6 +141,11 @@ animations live in `dot.js`.
 A Dot is a spritesheet pet, so it has the same limits as gallery pets: no cursor gaze,
 facings, or idle antics.
 
+`serve.mjs` binds to `127.0.0.1` and only accepts writes from the lab page itself:
+same-origin `application/json` POSTs with a localhost `Host` header. Run the tests with
+`node --test tools/dot-lab/dot-lab.test.mjs`. They cover the seeded PRNG, `normalize`,
+`reroll`, and the server's write guards.
+
 ## Where things live
 
 | Path | Purpose |
