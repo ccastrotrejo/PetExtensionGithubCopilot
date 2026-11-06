@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dot Lab · Copilot Pet</title>
+<style>
+  :root { color-scheme: light; --bg: oklch(97% 0.008 280); --panel: #fff; --ink: oklch(25% 0.02 280); --mute: oklch(55% 0.02 280); --line: oklch(91% 0.01 280); --accent: oklch(58% 0.19 275); }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); display: grid; grid-template-columns: 1fr 340px; height: 100dvh; }
+  main { display: flex; flex-direction: column; min-width: 0; overflow: auto; }
+  header { display: flex; gap: 8px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 18px; font-weight: 650; letter-spacing: -0.01em; margin: 0 8px 0 0; }
+  .seed { font: 11px ui-monospace, monospace; color: var(--mute); }
+  .seed input { width: 104px; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; }
+  button { font: inherit; padding: 6px 10px; border-radius: 7px; border: 1px solid var(--line); background: #fff; cursor: pointer; }
+  button:hover { border-color: oklch(80% 0.03 280); }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  button:disabled { opacity: .5; cursor: progress; }
+  #name { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; width: 150px; }
+  #status { color: var(--mute); font: 11px ui-monospace, monospace; margin-left: auto; overflow-wrap: anywhere; }
+  .stage { display: flex; justify-content: center; padding: 16px; }
+  #stage { width: min(576px, 100%); height: auto; aspect-ratio: 576 / 624; cursor: pointer; border-radius: 14px; background: repeating-conic-gradient(oklch(95% 0.005 280) 0 25%, #fff 0 50%) 0 0 / 24px 24px; }
+  @media (max-width: 960px) {
+    body { grid-template-columns: 1fr; height: auto; }
+    main { overflow: visible; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+    .strip { grid-template-columns: repeat(4, 1fr); }
+  }
+  .hint { text-align: center; color: var(--mute); margin-top: -6px; }
+  .strip { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; padding: 12px 16px; }
+  .strip button { padding: 4px; display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: var(--mute); }
+  .strip button[aria-pressed="true"] { border-color: var(--accent); color: var(--ink); }
+  .strip canvas { width: 96px; max-width: 100%; height: auto; aspect-ratio: 192/208; }
+  .rail { display: flex; gap: 8px; padding: 0 16px 16px; overflow-x: auto; min-height: 120px; align-items: flex-start; }
+  .rail:empty::before { content: "Saved configs appear here — click one to re-apply it."; color: var(--mute); padding: 12px 0; }
+  .rail button { padding: 4px; display: flex; flex-direction: column; align-items: center; font-size: 11px; flex: none; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow: auto; padding: 12px 14px 40px; }
+  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-bottom: 4px; }
+  .tabs button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: transparent; }
+  fieldset { border: 0; padding: 0; margin: 14px 0 0; }
+  legend { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--mute); margin-bottom: 4px; }
+  .row { display: grid; grid-template-columns: 22px 92px 1fr 44px; align-items: center; gap: 6px; padding: 2px 0; }
+  .row.off { opacity: .35; }
+  .row input[type=range] { width: 100%; }
+  .row output { font: 11px ui-monospace, monospace; text-align: right; color: var(--mute); }
+  .row select { font: inherit; padding: 3px; grid-column: span 2; }
+  .lock { border: 0; background: none; padding: 0; width: 22px; height: 22px; font-size: 12px; opacity: .35; }
+  .lock[aria-pressed="true"] { opacity: 1; }
+  .modehead { display: flex; align-items: center; justify-content: space-between; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Dot Lab</h1>
+    <label class="seed">seed <input id="seed" inputmode="numeric" aria-label="Seed" /></label>
+    <button id="reroll" title="Same as clicking the canvas">New Dot</button>
+    <input id="name" placeholder="name" aria-label="Config name" />
+    <button id="save" class="primary">Save</button>
+    <button id="export" title="Write a Petdex pack to assets/petdex/">Export pack</button>
+    <button id="install" title="Copy the exported pack to ~/.copilot-pet/pets/">Install</button>
+    <span id="status" role="status"></span>
+  </header>
+  <div class="stage"><canvas id="stage" width="576" height="624" aria-label="Dot preview — click for a new one"></canvas></div>
+  <p class="hint">Click the canvas for a new Dot (locked knobs stay) · Shift-click for new fur only · knobs to tweak · Save to keep</p>
+  <div class="strip" id="strip"></div>
+  <div class="rail" id="rail"></div>
+</main>
+<aside>
+  <div class="modehead"><legend>Silhouette</legend><button class="lock" data-key="mode" aria-label="Lock silhouette">🔓</button></div>
+  <div class="tabs" id="tabs"></div>
+  <div id="knobs"></div>
+</aside>
+<script type="module" src="./lab.js"></script>
+</body>
+</html>

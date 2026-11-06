@@ -84,6 +84,11 @@ spritesheet pets react to the same Copilot activity as the dog. Our dachshund ca
 be exported as a submittable Petdex pet (`tools/export-dachshund.sh`). Full details:
 [`docs/petdex.md`](docs/petdex.md).
 
+Want a plush, [OpenDots](https://www.copilotkit.ai/opendots)-style companion instead?
+**Dot Lab** (`node tools/dot-lab/serve.mjs`) is a seeded generator: click for a new Dot,
+tweak knobs, save the keeper, and export it as a Petdex pack the pet can use. See
+[`docs/petdex.md`](docs/petdex.md#dot-lab--design-your-own-dot).
+
 ## Configuration
 
 The pet works with zero setup. To customize it, copy the template and edit any keys you like — all
@@ -122,6 +127,7 @@ reference: [`docs/config.md`](docs/config.md).
 | `Tests/PetCoreTests.swift` | Unit tests for `Pose.make` / `Mood.autoNext` / `Cadence` / `PetConfig.parse` / behavior composition / Petdex model. |
 | `tools/export-dachshund.sh` | Export the dachshund as a submittable Petdex pet. |
 | `assets/petdex/copilot-dachshund/` | The exported Petdex pet (spritesheet + `pet.json`). |
+| `tools/dot-lab/` | Dot Lab — dev-only generator for OpenDots-style plush pets, exported as Petdex packs. |
 | `.bin/pet` | Compiled binary (git-ignored, rebuilt on demand). |
 | `docs/` | Full knowledge dump — see below. |
 
